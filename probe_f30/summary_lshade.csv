@@ -1,0 +1,2 @@
+function,dim,runs,N_init,N_min,best_mean,best_median,best_std,best_min,best_max,error_mean,error_median,final_pop_mean,final_pop_min,final_pop_max,wall_total
+cec2017_f30,10,51,180.0,4,3408.491051633487,3394.0074138290847,23.992307708637608,3394.0074138290847,3463.6421013095915,408.4910516334866,394.0074138290847,4.0,4,4,170.33961315173656

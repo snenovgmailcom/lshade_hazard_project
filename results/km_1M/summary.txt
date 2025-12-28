@@ -1,0 +1,15 @@
+============================================================
+SUMMARY STATISTICS
+============================================================
+
+Convergence classification:
+  clustered   : 11 functions (F5, F8, F11, F12, F13, F14, F15, F16, F17, F18, F19)
+  few_hits    :  2 functions (F10, F24)
+  no_hits     : 10 functions (F7, F21, F22, F23, F25, F26, F27, F28, F29, F30)
+
+Geometric envelope a_valid (13 functions):
+  Range: [0.000009, 0.001398]
+  Mean:  0.000469
+
+Functions with hits: 13 / 23
+Functions with 100% hit rate: 5

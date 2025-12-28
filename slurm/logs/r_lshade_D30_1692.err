@@ -1,0 +1,94 @@
++ source /home/svety/anaconda3/etc/profile.d/conda.sh
+++ export CONDA_EXE=/home/svety/anaconda3/bin/conda
+++ CONDA_EXE=/home/svety/anaconda3/bin/conda
+++ export _CE_M=
+++ _CE_M=
+++ export _CE_CONDA=
+++ _CE_CONDA=
+++ export CONDA_PYTHON_EXE=/home/svety/anaconda3/bin/python
+++ CONDA_PYTHON_EXE=/home/svety/anaconda3/bin/python
+++ '[' -z x ']'
++ conda activate intelpython
++ local cmd=activate
++ case "$cmd" in
++ __conda_activate activate intelpython
++ '[' -n '' ']'
++ local ask_conda
+++ PS1=
+++ __conda_exe shell.posix activate intelpython
+++ '[' -n '' ']'
+++ /home/svety/anaconda3/bin/conda shell.posix activate intelpython
++ ask_conda='. "/home/svety/anaconda3/envs/intelpython/etc/conda/deactivate.d/libglib_deactivate.sh"
+unset _CE_M
+unset _CE_CONDA
+PS1='\''(intelpython) '\''
+export PATH='\''/home/svety/anaconda3/envs/intelpython/bin:/home/svety/anaconda3/condabin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin'\''
+export CONDA_SHLVL='\''1'\''
+export CONDA_PROMPT_MODIFIER='\''(intelpython) '\''
+export CONDA_EXE='\''/home/svety/anaconda3/bin/conda'\''
+export CONDA_PYTHON_EXE='\''/home/svety/anaconda3/bin/python'\''
+. "/home/svety/anaconda3/envs/intelpython/etc/conda/activate.d/libglib_activate.sh"'
++ eval '. "/home/svety/anaconda3/envs/intelpython/etc/conda/deactivate.d/libglib_deactivate.sh"
+unset _CE_M
+unset _CE_CONDA
+PS1='\''(intelpython) '\''
+export PATH='\''/home/svety/anaconda3/envs/intelpython/bin:/home/svety/anaconda3/condabin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin'\''
+export CONDA_SHLVL='\''1'\''
+export CONDA_PROMPT_MODIFIER='\''(intelpython) '\''
+export CONDA_EXE='\''/home/svety/anaconda3/bin/conda'\''
+export CONDA_PYTHON_EXE='\''/home/svety/anaconda3/bin/python'\''
+. "/home/svety/anaconda3/envs/intelpython/etc/conda/activate.d/libglib_activate.sh"'
+++ . /home/svety/anaconda3/envs/intelpython/etc/conda/deactivate.d/libglib_deactivate.sh
++++ export GSETTINGS_SCHEMA_DIR=
++++ GSETTINGS_SCHEMA_DIR=
++++ unset GSETTINGS_SCHEMA_DIR_CONDA_BACKUP
++++ '[' -z ']'
++++ unset GSETTINGS_SCHEMA_DIR
+++ unset _CE_M
+++ unset _CE_CONDA
+++ PS1='(intelpython) '
+++ export PATH=/home/svety/anaconda3/envs/intelpython/bin:/home/svety/anaconda3/condabin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin
+++ PATH=/home/svety/anaconda3/envs/intelpython/bin:/home/svety/anaconda3/condabin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin
+++ export CONDA_SHLVL=1
+++ CONDA_SHLVL=1
+++ export 'CONDA_PROMPT_MODIFIER=(intelpython) '
+++ CONDA_PROMPT_MODIFIER='(intelpython) '
+++ export CONDA_EXE=/home/svety/anaconda3/bin/conda
+++ CONDA_EXE=/home/svety/anaconda3/bin/conda
+++ export CONDA_PYTHON_EXE=/home/svety/anaconda3/bin/python
+++ CONDA_PYTHON_EXE=/home/svety/anaconda3/bin/python
+++ . /home/svety/anaconda3/envs/intelpython/etc/conda/activate.d/libglib_activate.sh
++++ export GSETTINGS_SCHEMA_DIR_CONDA_BACKUP=
++++ GSETTINGS_SCHEMA_DIR_CONDA_BACKUP=
++++ export GSETTINGS_SCHEMA_DIR=/home/svety/anaconda3/envs/intelpython/share/glib-2.0/schemas
++++ GSETTINGS_SCHEMA_DIR=/home/svety/anaconda3/envs/intelpython/share/glib-2.0/schemas
++ __conda_hashr
++ '[' -n '' ']'
++ '[' -n '' ']'
++ hash -r
++ cd /home/svety/lshade_project
++ mkdir -p slurm/logs
++ mkdir -p experiments
++ export OMP_NUM_THREADS=1
++ OMP_NUM_THREADS=1
++ export MKL_NUM_THREADS=1
++ MKL_NUM_THREADS=1
++ export OPENBLAS_NUM_THREADS=1
++ OPENBLAS_NUM_THREADS=1
++ export VECLIB_MAXIMUM_THREADS=1
++ VECLIB_MAXIMUM_THREADS=1
++ export NUMEXPR_NUM_THREADS=1
++ NUMEXPR_NUM_THREADS=1
++ export PYTHONUNBUFFERED=1
++ PYTHONUNBUFFERED=1
++ OUTDIR=experiments/r_lshade_D30
++ mkdir -p experiments/r_lshade_D30
+++ date
+++ hostname
++ echo '=== R-LSHADE D=30 started at Sun Dec 28 03:33:21 PM EET 2025 on srv-01 ==='
++ echo 'Output dir: experiments/r_lshade_D30'
++ CMD=(python benchmarks/r_benchmark.py --dim 30 --functions all --runs 51 --jobs 180 --max-evals 300000 --seed-start 42 --outdir "$OUTDIR")
++ printf '%q ' python benchmarks/r_benchmark.py --dim 30 --functions all --runs 51 --jobs 180 --max-evals 300000 --seed-start 42 --outdir experiments/r_lshade_D30
++ echo
++ chmod +x experiments/r_lshade_D30/run_command.sh
++ python benchmarks/r_benchmark.py --dim 30 --functions all --runs 51 --jobs 180 --max-evals 300000 --seed-start 42 --outdir experiments/r_lshade_D30

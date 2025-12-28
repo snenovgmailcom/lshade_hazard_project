@@ -1,0 +1,14 @@
+============================================================
+SUMMARY STATISTICS
+============================================================
+Functions analyzed: 23
+
+Convergence classification:
+  few_hits: 2 functions (F10, F24)
+  moderate: 11 functions (F5, F8, F11, F12, F13...)
+  no_hits: 10 functions (F7, F21, F22, F23, F25...)
+
+Hit rates:
+  100% hit rate: 5 functions
+  >50% hit rate: 9 functions
+  0% hit rate:   10 functions

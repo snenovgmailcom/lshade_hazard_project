@@ -1,0 +1,170 @@
+# analysis/combine_budgets.py
+"""
+Combine L-SHADE results across different budget levels (100k, 1M, 200M).
+"""
+import pickle
+import numpy as np
+from pathlib import Path
+from analysis.hazard_utils import analyze_function
+
+# ======================================================
+# CONFIG
+# ======================================================
+CEC2017_OPTIMA = {f"cec2017_f{i}": 100.0 * i for i in range(1, 31)}
+EPSILON = 1e-2
+
+EXPERIMENTS = {
+    "100k": "experiments/r_lshade_D10_nfev_100000/raw_results_lshade.pkl",
+    "1M": "experiments/r_lshade_D10_nfev_1000000/raw_results_lshade.pkl",
+    "200M": "experiments/r_lshade_D10_nfev_200000000/raw_results_lshade.pkl",
+}
+
+# ======================================================
+# MAIN
+# ======================================================
+def load_data(pkl_path: str) -> dict:
+    p = Path(pkl_path)
+    if not p.exists():
+        return None
+    with open(p, "rb") as f:
+        return pickle.load(f)
+
+
+def main():
+    print("=" * 120)
+    print("COMBINED BUDGET ANALYSIS: L-SHADE, D=10")
+    print("=" * 120)
+
+    # Load all available data
+    all_data = {}
+    for label, path in EXPERIMENTS.items():
+        data = load_data(path)
+        if data is not None:
+            all_data[label] = data
+            print(f"Loaded {label}: {path}")
+        else:
+            print(f"Missing {label}: {path}")
+
+    if not all_data:
+        print("No data found!")
+        return
+
+    # Get all functions from any dataset
+    all_funcs = set()
+    for data in all_data.values():
+        all_funcs.update(data.keys())
+    funcs = sorted(all_funcs, key=lambda x: int(x.split("_f")[1]))
+
+    # Analyze each function at each budget
+    results = {label: {} for label in all_data.keys()}
+    for label, data in all_data.items():
+        for fname in funcs:
+            if fname in data:
+                f_star = CEC2017_OPTIMA[fname]
+                curves = [run["curve"] for run in data[fname]]
+                r = analyze_function(curves, f_star, EPSILON)
+                results[label][fname] = r
+
+    # Print combined table
+    budgets = list(all_data.keys())
+    
+    print("\n" + "=" * 120)
+    print("HIT RATES BY BUDGET")
+    print("=" * 120)
+    header = f"{'Function':<14}"
+    for b in budgets:
+        header += f" {b:>12}"
+    print(header)
+    print("-" * (14 + 13 * len(budgets)))
+
+    for fname in funcs:
+        row = f"{fname:<14}"
+        for b in budgets:
+            if fname in results[b]:
+                r = results[b][fname]
+                row += f" {r['hits']:>4}/{r['n_runs']:<3} ({r['hit_rate']:>5.1%})"
+            else:
+                row += f" {'--':>12}"
+        print(row)
+
+    # Detailed table with p_hat and a_valid
+    print("\n" + "=" * 120)
+    print("DETAILED: p_hat (constant hazard MLE)")
+    print("=" * 120)
+    header = f"{'Function':<14}"
+    for b in budgets:
+        header += f" {b:>14}"
+    print(header)
+    print("-" * (14 + 15 * len(budgets)))
+
+    for fname in funcs:
+        row = f"{fname:<14}"
+        for b in budgets:
+            if fname in results[b] and results[b][fname]["p_cens"] is not None:
+                p = results[b][fname]["p_cens"]
+                row += f" {p:>14.6g}"
+            else:
+                row += f" {'--':>14}"
+        print(row)
+
+    print("\n" + "=" * 120)
+    print("DETAILED: a_valid (valid geometric bound)")
+    print("=" * 120)
+    header = f"{'Function':<14}"
+    for b in budgets:
+        header += f" {b:>14}"
+    print(header)
+    print("-" * (14 + 15 * len(budgets)))
+
+    for fname in funcs:
+        row = f"{fname:<14}"
+        for b in budgets:
+            if fname in results[b] and results[b][fname]["a_valid"] is not None:
+                a = results[b][fname]["a_valid"]
+                row += f" {a:>14.6g}"
+            else:
+                row += f" {'--':>14}"
+        print(row)
+
+    print("\n" + "=" * 120)
+    print("DETAILED: a/p ratio")
+    print("=" * 120)
+    header = f"{'Function':<14}"
+    for b in budgets:
+        header += f" {b:>14}"
+    print(header)
+    print("-" * (14 + 15 * len(budgets)))
+
+    for fname in funcs:
+        row = f"{fname:<14}"
+        for b in budgets:
+            if fname in results[b] and results[b][fname]["ratio"] is not None:
+                ratio = results[b][fname]["ratio"]
+                row += f" {ratio:>14.4f}"
+            else:
+                row += f" {'--':>14}"
+        print(row)
+
+    # Summary: functions that improved with more budget
+    print("\n" + "=" * 120)
+    print("SUMMARY: Functions with 0 hits at 1M that got hits at 200M")
+    print("=" * 120)
+    
+    if "1M" in results and "200M" in results:
+        improved = []
+        for fname in funcs:
+            hits_1M = results["1M"].get(fname, {}).get("hits", 0)
+            hits_200M = results["200M"].get(fname, {}).get("hits", 0)
+            if hits_1M == 0 and hits_200M > 0:
+                improved.append((fname, hits_200M))
+        
+        if improved:
+            for fname, hits in improved:
+                r = results["200M"][fname]
+                print(f"{fname}: {hits}/51 hits, T={r['T']}, τ_med={r['tau_median']:.0f}")
+        else:
+            print("None (or 200M data not yet available)")
+
+
+if __name__ == "__main__":
+    main()

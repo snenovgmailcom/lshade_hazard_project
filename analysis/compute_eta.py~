@@ -1,0 +1,61 @@
+from scipy.stats import binom
+import numpy as np
+
+def eta_r(d, c0, r):
+    """
+    Compute η_r(d, c_0) = P(Binomial(d-1, 1-c0) ≤ r)
+    = sum_{k=0}^r C(d-1,k) (1-c0)^k c0^{d-1-k}
+    """
+    return binom.cdf(r, d-1, 1-c0)
+
+def compare_bounds(d, c0):
+    """Compare old vs new bound."""
+    old = c0 ** (d-1)
+    r_half = (d-1) // 2
+    new = eta_r(d, c0, r_half)
+    
+    print(f"d={d}, c0={c0}:")
+    print(f"  Old bound: c0^(d-1) = {old:.2e}")
+    print(f"  New bound: η_{r_half}(d,c0) = {new:.4f}")
+    print(f"  Improvement: {new/old:.1e}x")
+    return old, new
+
+# Test
+print("=" * 50)
+print("COMPARISON: OLD vs NEW CROSSOVER BOUND")
+print("=" * 50)
+
+for d in [10, 20, 30, 50, 100]:
+    compare_bounds(d, 0.5)
+    print()
+```
+
+**Output:**
+```
+==================================================
+COMPARISON: OLD vs NEW CROSSOVER BOUND
+==================================================
+d=10, c0=0.5:
+  Old bound: c0^(d-1) = 1.95e-03
+  New bound: η_4(d,c0) = 0.5000
+  Improvement: 2.6e+02x
+
+d=20, c0=0.5:
+  Old bound: c0^(d-1) = 1.91e-06
+  New bound: η_9(d,c0) = 0.5000
+  Improvement: 2.6e+05x
+
+d=30, c0=0.5:
+  Old bound: c0^(d-1) = 1.86e-09
+  New bound: η_14(d,c0) = 0.5000
+  Improvement: 2.7e+08x
+
+d=50, c0=0.5:
+  Old bound: c0^(d-1) = 1.78e-15
+  New bound: η_24(d,c0) = 0.5000
+  Improvement: 2.8e+14x
+
+d=100, c0=0.5:
+  Old bound: c0^(d-1) = 1.58e-30
+  New bound: η_49(d,c0) = 0.5000
+  Improvement: 3.2e+29x

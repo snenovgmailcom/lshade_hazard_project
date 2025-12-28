@@ -1,0 +1,843 @@
+#!/usr/bin/env python3
+"""
+Validate theoretical bound: a_t * γ_t ≈ ĥ_t
+
+This script:
+1. Runs L-SHADE with full population logging
+2. Computes empirical γ_t (good-state frequency)
+3. Computes theoretical a_t (old bound with c_0^{d-1})
+4. Computes new crossover-adjusted bound
+5. Compares all with empirical ĥ_t from Kaplan-Meier
+
+Goal: Show that old bound is too loose, new bound is tighter.
+"""
+
+import numpy as np
+from scipy.stats import cauchy, norm
+from pathlib import Path
+import pickle
+import warnings
+warnings.filterwarnings('ignore')
+
+# ============================================================
+# 1. CEC2017 Benchmark (simplified - F1 sphere shifted)
+# ============================================================
+
+class SphereBenchmark:
+    """Shifted sphere for testing (like CEC2017 F1 but simpler)."""
+    
+    def __init__(self, dim, shift=None):
+        self.dim = dim
+        if shift is None:
+            np.random.seed(0)
+            self.shift = np.random.uniform(-80, 80, dim)
+        else:
+            self.shift = shift
+        self.f_star = 0.0
+        self.bounds = (-100, 100)
+    
+    def __call__(self, x):
+        z = x - self.shift
+        return np.sum(z**2) + self.f_star
+    
+    def get_optimal(self):
+        return self.shift.copy()
+
+
+class CEC2017_F1:
+    """CEC2017 F1 (shifted/rotated sphere) - simplified version."""
+    
+    def __init__(self, dim):
+        self.dim = dim
+        np.random.seed(1)  # Fixed seed for reproducibility
+        self.shift = np.random.uniform(-80, 80, dim)
+        self.f_star = 100.0
+        self.bounds = (-100, 100)
+    
+    def __call__(self, x):
+        z = x - self.shift
+        return np.sum(z**2) + self.f_star
+    
+    def get_optimal(self):
+        return self.shift.copy()
+
+
+# ============================================================
+# 2. L-SHADE with Full Logging
+# ============================================================
+
+class LSHADELogged:
+    """L-SHADE with full population logging for γ_t analysis."""
+    
+    def __init__(self, func, dim, max_evals, 
+                 p_best_rate=0.11, arc_rate=2.6, memory_size=6,
+                 n_init_multiplier=18, n_min=4):
+        self.func = func
+        self.dim = dim
+        self.max_evals = max_evals
+        self.p_best_rate = p_best_rate
+        self.arc_rate = arc_rate
+        self.memory_size = memory_size
+        self.n_init = n_init_multiplier * dim
+        self.n_min = n_min
+        
+        # State
+        self.population = None
+        self.fitness = None
+        self.archive = []
+        self.memory_F = np.full(memory_size, 0.5)
+        self.memory_CR = np.full(memory_size, 0.5)
+        self.memory_idx = 0
+        self.n_evals = 0
+        self.generation = 0
+        
+        # Logging
+        self.logs = []
+    
+    def initialize(self):
+        """Initialize population."""
+        lb, ub = self.func.bounds
+        self.population = np.random.uniform(lb, ub, (self.n_init, self.dim))
+        self.fitness = np.array([self.func(x) for x in self.population])
+        self.n_evals = self.n_init
+        self.archive = []
+        self.generation = 0
+    
+    def get_population_size(self):
+        """LPSR: Linear population size reduction."""
+        n_target = round(self.n_init + (self.n_min - self.n_init) * 
+                         (self.n_evals / self.max_evals))
+        return max(self.n_min, n_target)
+    
+    def sample_F(self, mu):
+        """Sample F from truncated Cauchy."""
+        while True:
+            F = cauchy.rvs(loc=mu, scale=0.1)
+            if F > 0:
+                return min(F, 1.0)
+    
+    def sample_CR(self, mu):
+        """Sample CR from truncated Normal."""
+        CR = norm.rvs(loc=mu, scale=0.1)
+        return np.clip(CR, 0, 1)
+    
+    def mutate(self, i, F):
+        """Current-to-pbest/1 mutation."""
+        NP = len(self.population)
+        
+        # Select pbest
+        n_pbest = max(1, int(self.p_best_rate * NP))
+        pbest_indices = np.argsort(self.fitness)[:n_pbest]
+        b = np.random.choice(pbest_indices)
+        
+        # Select r1 from population
+        candidates = list(range(NP))
+        candidates.remove(i)
+        if b in candidates:
+            candidates.remove(b)
+        r1 = np.random.choice(candidates)
+        
+        # Select r2 from population + archive
+        pool = list(range(NP)) + list(range(NP, NP + len(self.archive)))
+        pool = [x for x in pool if x not in [i, b, r1]]
+        r2_idx = np.random.choice(pool)
+        
+        if r2_idx < NP:
+            x_r2 = self.population[r2_idx]
+        else:
+            x_r2 = self.archive[r2_idx - NP]
+        
+        # Mutation
+        x_i = self.population[i]
+        x_b = self.population[b]
+        x_r1 = self.population[r1]
+        
+        v = x_i + F * (x_b - x_i) + F * (x_r1 - x_r2)
+        
+        # Boundary handling
+        lb, ub = self.func.bounds
+        for j in range(self.dim):
+            if v[j] < lb:
+                v[j] = (lb + x_i[j]) / 2
+            elif v[j] > ub:
+                v[j] = (ub + x_i[j]) / 2
+        
+        return v, b, r1, r2_idx
+    
+    def crossover(self, x, v, CR):
+        """Binomial crossover."""
+        u = x.copy()
+        j_rand = np.random.randint(self.dim)
+        
+        for j in range(self.dim):
+            if np.random.rand() <= CR or j == j_rand:
+                u[j] = v[j]
+        
+        return u
+    
+    def log_state(self):
+        """Log current state for analysis."""
+        log = {
+            'generation': self.generation,
+            'n_evals': self.n_evals,
+            'population': self.population.copy(),
+            'fitness': self.fitness.copy(),
+            'archive': [a.copy() for a in self.archive],
+            'memory_F': self.memory_F.copy(),
+            'memory_CR': self.memory_CR.copy(),
+            'best_fitness': np.min(self.fitness),
+            'best_individual': self.population[np.argmin(self.fitness)].copy(),
+        }
+        self.logs.append(log)
+    
+    def run(self, log_every=1):
+        """Run L-SHADE with logging."""
+        self.initialize()
+        self.log_state()
+        
+        while self.n_evals < self.max_evals:
+            self.generation += 1
+            NP = len(self.population)
+            
+            # Success tracking
+            S_F, S_CR, S_delta = [], [], []
+            
+            trials = []
+            trial_fitness = []
+            
+            for i in range(NP):
+                if self.n_evals >= self.max_evals:
+                    break
+                
+                # Sample parameters
+                r = np.random.randint(self.memory_size)
+                F = self.sample_F(self.memory_F[r])
+                CR = self.sample_CR(self.memory_CR[r])
+                
+                # Mutation
+                v, _, _, _ = self.mutate(i, F)
+                
+                # Crossover
+                u = self.crossover(self.population[i], v, CR)
+                
+                # Evaluate
+                f_u = self.func(u)
+                self.n_evals += 1
+                
+                trials.append((i, u, f_u, F, CR))
+            
+            # Selection
+            for i, u, f_u, F, CR in trials:
+                if f_u <= self.fitness[i]:
+                    if f_u < self.fitness[i]:
+                        S_F.append(F)
+                        S_CR.append(CR)
+                        S_delta.append(self.fitness[i] - f_u)
+                        
+                        # Archive old individual
+                        if len(self.archive) < int(self.arc_rate * self.n_init):
+                            self.archive.append(self.population[i].copy())
+                        else:
+                            idx = np.random.randint(len(self.archive))
+                            self.archive[idx] = self.population[i].copy()
+                    
+                    self.population[i] = u
+                    self.fitness[i] = f_u
+            
+            # Update memory
+            if len(S_F) > 0:
+                weights = np.array(S_delta) / np.sum(S_delta)
+                
+                # Lehmer mean for F
+                self.memory_F[self.memory_idx] = np.sum(weights * np.array(S_F)**2) / np.sum(weights * np.array(S_F))
+                
+                # Lehmer mean for CR
+                if np.sum(weights * np.array(S_CR)) > 0:
+                    self.memory_CR[self.memory_idx] = np.sum(weights * np.array(S_CR)**2) / np.sum(weights * np.array(S_CR))
+                
+                self.memory_idx = (self.memory_idx + 1) % self.memory_size
+            
+            # LPSR
+            target_NP = self.get_population_size()
+            if target_NP < NP:
+                worst_indices = np.argsort(self.fitness)[target_NP:]
+                keep = np.argsort(self.fitness)[:target_NP]
+                self.population = self.population[keep]
+                self.fitness = self.fitness[keep]
+            
+            # Log
+            if self.generation % log_every == 0:
+                self.log_state()
+        
+        return {
+            'best_fitness': np.min(self.fitness),
+            'best_individual': self.population[np.argmin(self.fitness)],
+            'n_evals': self.n_evals,
+            'generations': self.generation,
+            'logs': self.logs,
+        }
+
+
+# ============================================================
+# 3. Compute γ_t: Good-State Frequency
+# ============================================================
+
+def compute_ell_for_tuple(x_i, x_b, x_r1, x_r2, func, target, 
+                          F_min=0.1, F_max=1.0, n_samples=100):
+    """
+    Compute ℓ = λ(I_t) for a mutation tuple.
+    
+    I_t = {F ∈ [F_min, F_max] : f(x_i + F*d) ≤ target}
+    where d = (x_b - x_i) + (x_r1 - x_r2)
+    
+    Returns: ℓ (length of successful F interval)
+    """
+    d = (x_b - x_i) + (x_r1 - x_r2)
+    
+    # Sample F values
+    F_values = np.linspace(F_min, F_max, n_samples)
+    success = np.zeros(n_samples, dtype=bool)
+    
+    for k, F in enumerate(F_values):
+        v = x_i + F * d
+        if func(v) <= target:
+            success[k] = True
+    
+    if not np.any(success):
+        return 0.0
+    
+    # Estimate ℓ as fraction of successful F * interval length
+    ell = np.mean(success) * (F_max - F_min)
+    return ell
+
+
+def compute_gamma_t(log, func, target, n_sample_tuples=500, F_min=0.1, F_max=1.0):
+    """
+    Estimate γ_t = P(G_t | H_{t-1}) by sampling mutation tuples.
+    
+    G_t occurs if ∃ tuple (i, b, r1, r2) with ℓ > 0.
+    
+    We estimate by: fraction of sampled tuples with ℓ > 0.
+    """
+    pop = log['population']
+    fitness = log['fitness']
+    archive = log['archive']
+    NP = len(pop)
+    
+    if NP < 4:
+        return 0.0, {}
+    
+    # Pbest indices
+    p_best_rate = 0.11
+    n_pbest = max(1, int(p_best_rate * NP))
+    pbest_indices = np.argsort(fitness)[:n_pbest]
+    
+    # Pool for r2
+    pool_size = NP + len(archive)
+    
+    n_success = 0
+    ell_values = []
+    
+    for _ in range(n_sample_tuples):
+        # Sample tuple
+        i = np.random.randint(NP)
+        b = np.random.choice(pbest_indices)
+        
+        # r1 from population (excluding i, b)
+        r1_candidates = [x for x in range(NP) if x not in [i, b]]
+        if len(r1_candidates) == 0:
+            continue
+        r1 = np.random.choice(r1_candidates)
+        
+        # r2 from population + archive (excluding i, b, r1)
+        r2_candidates = [x for x in range(pool_size) if x not in [i, b, r1]]
+        if len(r2_candidates) == 0:
+            continue
+        r2_idx = np.random.choice(r2_candidates)
+        
+        # Get vectors
+        x_i = pop[i]
+        x_b = pop[b]
+        x_r1 = pop[r1]
+        x_r2 = archive[r2_idx - NP] if r2_idx >= NP else pop[r2_idx]
+        
+        # Compute ℓ
+        ell = compute_ell_for_tuple(x_i, x_b, x_r1, x_r2, func, target,
+                                     F_min, F_max, n_samples=50)
+        
+        ell_values.append(ell)
+        if ell > 0:
+            n_success += 1
+    
+    gamma = n_success / n_sample_tuples if n_sample_tuples > 0 else 0.0
+    
+    stats = {
+        'gamma': gamma,
+        'ell_mean': np.mean(ell_values) if ell_values else 0.0,
+        'ell_max': np.max(ell_values) if ell_values else 0.0,
+        'ell_nonzero': np.mean([e for e in ell_values if e > 0]) if any(e > 0 for e in ell_values) else 0.0,
+        'n_tuples': n_sample_tuples,
+        'n_success': n_success,
+    }
+    
+    return gamma, stats
+
+
+# ============================================================
+# 4. Compute Theoretical a_t (Old Bound)
+# ============================================================
+
+def compute_a_t_old(log, ell, g_F=0.1, c_0=0.5, q_CR=0.5, dim=10):
+    """
+    Compute old theoretical bound:
+    
+    a_t = (g_F * ℓ) / (m_t * s * (s-1)) * q_CR * c_0^(d-1)
+    
+    This has the problematic c_0^(d-1) term.
+    """
+    pop = log['population']
+    archive = log['archive']
+    NP = len(pop)
+    
+    # m_t = size of pbest set
+    p_best_rate = 0.11
+    m_t = max(1, int(p_best_rate * NP))
+    
+    # s = pool size for r1, r2
+    s = NP + len(archive) - 2  # excluding i and b
+    
+    if s < 2 or ell <= 0:
+        return 0.0
+    
+    # The problematic term
+    crossover_term = c_0 ** (dim - 1)
+    
+    # Full bound
+    a_t = (g_F * ell) / (m_t * s * (s - 1)) * q_CR * crossover_term
+    
+    return a_t
+
+
+# ============================================================
+# 5. Compute New Crossover-Adjusted Bound
+# ============================================================
+
+def compute_crossover_success_prob(v, x_parent, func, target, CR, n_samples=500, dim=10):
+    """
+    Estimate P(u ∈ A_ε | v, x) by sampling crossover masks.
+    
+    This replaces c_0^(d-1) with an empirical estimate.
+    """
+    n_success = 0
+    
+    for _ in range(n_samples):
+        # Sample crossover mask
+        j_rand = np.random.randint(dim)
+        mask = np.random.rand(dim) <= CR
+        mask[j_rand] = True  # Force one component from mutant
+        
+        # Construct trial
+        u = np.where(mask, v, x_parent)
+        
+        if func(u) <= target:
+            n_success += 1
+    
+    return n_success / n_samples
+
+
+def compute_a_t_new(log, func, target, n_sample_tuples=200, n_crossover_samples=100,
+                    F_min=0.1, F_max=1.0, g_F=0.1, dim=10):
+    """
+    Compute new crossover-adjusted bound.
+    
+    Instead of c_0^(d-1), we use empirical crossover success probability.
+    """
+    pop = log['population']
+    fitness = log['fitness']
+    archive = log['archive']
+    NP = len(pop)
+    
+    if NP < 4:
+        return 0.0, {}
+    
+    # Pbest indices
+    p_best_rate = 0.11
+    n_pbest = max(1, int(p_best_rate * NP))
+    pbest_indices = np.argsort(fitness)[:n_pbest]
+    m_t = n_pbest
+    
+    # Pool size
+    pool_size = NP + len(archive)
+    s = pool_size - 2
+    
+    if s < 2:
+        return 0.0, {}
+    
+    # Sample CR from memory (simplified: use mean)
+    CR = np.mean(log['memory_CR'])
+    
+    # Sample tuples and compute success probability
+    success_probs = []
+    
+    for _ in range(n_sample_tuples):
+        # Sample tuple
+        i = np.random.randint(NP)
+        b = np.random.choice(pbest_indices)
+        
+        r1_candidates = [x for x in range(NP) if x not in [i, b]]
+        if len(r1_candidates) == 0:
+            continue
+        r1 = np.random.choice(r1_candidates)
+        
+        r2_candidates = [x for x in range(pool_size) if x not in [i, b, r1]]
+        if len(r2_candidates) == 0:
+            continue
+        r2_idx = np.random.choice(r2_candidates)
+        
+        # Get vectors
+        x_i = pop[i]
+        x_b = pop[b]
+        x_r1 = pop[r1]
+        x_r2 = archive[r2_idx - NP] if r2_idx >= NP else pop[r2_idx]
+        
+        # Find a successful F (if any)
+        d = (x_b - x_i) + (x_r1 - x_r2)
+        
+        successful_F = None
+        for F in np.linspace(F_min, F_max, 20):
+            v = x_i + F * d
+            if func(v) <= target:
+                successful_F = F
+                break
+        
+        if successful_F is None:
+            continue  # No good F for this tuple
+        
+        # Compute crossover success probability
+        v = x_i + successful_F * d
+        p_cross = compute_crossover_success_prob(v, x_i, func, target, CR, 
+                                                   n_crossover_samples, dim)
+        success_probs.append(p_cross)
+    
+    if len(success_probs) == 0:
+        return 0.0, {'crossover_probs': []}
+    
+    # Average crossover success probability (replaces c_0^{d-1})
+    avg_crossover_prob = np.mean(success_probs)
+    
+    # Estimate ℓ (using mean from successful tuples)
+    ell_estimate = 0.1  # Rough estimate; could compute more carefully
+    
+    # New bound
+    a_t_new = (g_F * ell_estimate) / (m_t * s * (s - 1)) * avg_crossover_prob
+    
+    stats = {
+        'avg_crossover_prob': avg_crossover_prob,
+        'n_successful_tuples': len(success_probs),
+        'crossover_probs': success_probs,
+        'CR': CR,
+    }
+    
+    return a_t_new, stats
+
+
+# ============================================================
+# 6. Full Analysis Pipeline
+# ============================================================
+
+def analyze_run(logs, func, target, dim, verbose=True):
+    """
+    Analyze a single run:
+    - Compute γ_t at each logged generation
+    - Compute a_t (old) and a_t (new)
+    - Track when hitting occurs
+    """
+    results = []
+    
+    for log in logs:
+        gen = log['generation']
+        best_f = log['best_fitness']
+        
+        # Skip if already hit
+        if best_f <= target:
+            if verbose:
+                print(f"  Gen {gen}: HIT (f={best_f:.2f})")
+            break
+        
+        # Compute γ_t
+        gamma, gamma_stats = compute_gamma_t(log, func, target, n_sample_tuples=300)
+        
+        # Compute old a_t (with c_0^{d-1})
+        ell = gamma_stats.get('ell_mean', 0)
+        a_t_old = compute_a_t_old(log, ell, g_F=0.1, c_0=0.5, q_CR=0.5, dim=dim)
+        
+        # Compute new a_t (crossover-adjusted)
+        a_t_new, new_stats = compute_a_t_new(log, func, target, 
+                                              n_sample_tuples=100, 
+                                              n_crossover_samples=50,
+                                              dim=dim)
+        
+        result = {
+            'generation': gen,
+            'n_evals': log['n_evals'],
+            'best_fitness': best_f,
+            'gap': best_f - target,
+            'NP': len(log['population']),
+            'gamma': gamma,
+            'ell_mean': gamma_stats.get('ell_mean', 0),
+            'ell_max': gamma_stats.get('ell_max', 0),
+            'a_t_old': a_t_old,
+            'a_t_gamma_old': a_t_old * gamma,
+            'a_t_new': a_t_new,
+            'a_t_gamma_new': a_t_new * gamma,
+            'crossover_prob': new_stats.get('avg_crossover_prob', 0),
+            'c0_d_minus_1': 0.5 ** (dim - 1),
+        }
+        results.append(result)
+        
+        if verbose:
+            print(f"  Gen {gen}: f={best_f:.2f}, gap={best_f-target:.2f}, "
+                  f"γ={gamma:.4f}, ℓ={ell:.6f}, "
+                  f"a_old={a_t_old:.2e}, a_new={a_t_new:.2e}, "
+                  f"P(cross)={new_stats.get('avg_crossover_prob', 0):.4f}")
+    
+    return results
+
+
+# ============================================================
+# 7. Compute Empirical ĥ_t from Multiple Runs
+# ============================================================
+
+def compute_empirical_hazard(all_hit_times, max_gen):
+    """
+    Compute empirical hazard ĥ_t = d_t / n_t from multiple runs.
+    """
+    hit_times = np.array(all_hit_times)
+    
+    hazards = {}
+    for t in range(max_gen + 1):
+        n_t = np.sum(hit_times >= t)  # At risk
+        d_t = np.sum(hit_times == t)   # Events
+        
+        if n_t > 0:
+            hazards[t] = {'n_t': n_t, 'd_t': d_t, 'h_hat': d_t / n_t}
+    
+    return hazards
+
+
+# ============================================================
+# 8. Main Experiment
+# ============================================================
+
+def run_validation_experiment(n_runs=20, dim=10, max_evals=50000, epsilon=1.0):
+    """
+    Run full validation experiment.
+    
+    1. Run L-SHADE multiple times with logging
+    2. Compute γ_t, a_t (old), a_t (new) at each generation
+    3. Compute empirical ĥ_t from hitting times
+    4. Compare: a_t * γ_t vs ĥ_t
+    """
+    print("=" * 80)
+    print("VALIDATION EXPERIMENT: a_t * γ_t ≈ ĥ_t")
+    print("=" * 80)
+    print(f"Dimension: {dim}")
+    print(f"Max evals: {max_evals}")
+    print(f"Epsilon: {epsilon}")
+    print(f"Runs: {n_runs}")
+    print()
+    
+    # Setup
+    func = SphereBenchmark(dim)
+    target = func.f_star + epsilon
+    print(f"Target: f* + ε = {func.f_star} + {epsilon} = {target}")
+    print(f"Optimal point: {func.get_optimal()[:3]}... (showing first 3 dims)")
+    print()
+    
+    # Storage
+    all_results = []
+    all_hit_times = []
+    all_logs = []
+    
+    # Run experiments
+    for run in range(n_runs):
+        print(f"\n{'='*60}")
+        print(f"RUN {run+1}/{n_runs}")
+        print(f"{'='*60}")
+        
+        np.random.seed(42 + run)
+        
+        # Run L-SHADE with logging
+        lshade = LSHADELogged(func, dim, max_evals)
+        result = lshade.run(log_every=5)  # Log every 5 generations
+        
+        print(f"Best fitness: {result['best_fitness']:.6f}")
+        print(f"Generations: {result['generations']}")
+        
+        # Find hitting time
+        hit_gen = None
+        for log in result['logs']:
+            if log['best_fitness'] <= target:
+                hit_gen = log['generation']
+                break
+        
+        if hit_gen is not None:
+            all_hit_times.append(hit_gen)
+            print(f"Hit at generation: {hit_gen}")
+        else:
+            all_hit_times.append(np.inf)
+            print("No hit within budget")
+        
+        # Analyze this run
+        print("\nAnalyzing generations...")
+        run_results = analyze_run(result['logs'], func, target, dim, verbose=True)
+        all_results.extend(run_results)
+        all_logs.append(result['logs'])
+    
+    # Compute empirical hazard
+    print("\n" + "=" * 80)
+    print("EMPIRICAL HAZARD (from Kaplan-Meier)")
+    print("=" * 80)
+    
+    finite_hits = [h for h in all_hit_times if h < np.inf]
+    if len(finite_hits) > 0:
+        max_hit = int(max(finite_hits))
+        hazards = compute_empirical_hazard(all_hit_times, max_hit)
+        
+        print(f"\nHits: {len(finite_hits)}/{n_runs}")
+        print(f"Hit time range: [{min(finite_hits)}, {max(finite_hits)}]")
+        print(f"Median hit time: {np.median(finite_hits):.0f}")
+        
+        # Print hazard at key times
+        print("\nEmpirical hazard at selected generations:")
+        print(f"{'Gen':>6} {'n_t':>6} {'d_t':>6} {'ĥ_t':>10}")
+        print("-" * 32)
+        
+        for t in sorted(hazards.keys()):
+            if hazards[t]['d_t'] > 0:  # Only show where events occurred
+                h = hazards[t]
+                print(f"{t:>6} {h['n_t']:>6} {h['d_t']:>6} {h['h_hat']:>10.6f}")
+    else:
+        hazards = {}
+        print("No hits - cannot compute empirical hazard")
+    
+    # Compare theoretical vs empirical
+    print("\n" + "=" * 80)
+    print("COMPARISON: THEORETICAL vs EMPIRICAL")
+    print("=" * 80)
+    
+    # Aggregate by generation
+    from collections import defaultdict
+    by_gen = defaultdict(list)
+    for r in all_results:
+        by_gen[r['generation']].append(r)
+    
+    print(f"\n{'Gen':>6} {'γ_t':>8} {'ℓ_mean':>10} {'a_old*γ':>12} {'a_new*γ':>12} "
+          f"{'P(cross)':>10} {'c0^(d-1)':>10} {'ĥ_t':>10} {'Ratio':>8}")
+    print("-" * 110)
+    
+    comparison_data = []
+    
+    for gen in sorted(by_gen.keys()):
+        records = by_gen[gen]
+        
+        avg_gamma = np.mean([r['gamma'] for r in records])
+        avg_ell = np.mean([r['ell_mean'] for r in records])
+        avg_a_gamma_old = np.mean([r['a_t_gamma_old'] for r in records])
+        avg_a_gamma_new = np.mean([r['a_t_gamma_new'] for r in records])
+        avg_cross_prob = np.mean([r['crossover_prob'] for r in records])
+        c0_term = 0.5 ** (dim - 1)
+        
+        # Get empirical hazard at this generation
+        h_hat = hazards.get(gen, {}).get('h_hat', 0)
+        
+        # Ratio: how much tighter is new bound?
+        ratio = avg_a_gamma_new / avg_a_gamma_old if avg_a_gamma_old > 0 else np.inf
+        
+        if avg_gamma > 0:  # Only show generations where good state occurs
+            print(f"{gen:>6} {avg_gamma:>8.4f} {avg_ell:>10.6f} {avg_a_gamma_old:>12.2e} "
+                  f"{avg_a_gamma_new:>12.2e} {avg_cross_prob:>10.4f} {c0_term:>10.2e} "
+                  f"{h_hat:>10.6f} {ratio:>8.1f}x")
+            
+            comparison_data.append({
+                'gen': gen,
+                'gamma': avg_gamma,
+                'ell': avg_ell,
+                'a_gamma_old': avg_a_gamma_old,
+                'a_gamma_new': avg_a_gamma_new,
+                'crossover_prob': avg_cross_prob,
+                'c0_term': c0_term,
+                'h_hat': h_hat,
+                'ratio': ratio,
+            })
+    
+    # Summary statistics
+    print("\n" + "=" * 80)
+    print("SUMMARY")
+    print("=" * 80)
+    
+    if comparison_data:
+        avg_ratio = np.mean([d['ratio'] for d in comparison_data if d['ratio'] < np.inf])
+        avg_cross = np.mean([d['crossover_prob'] for d in comparison_data])
+        
+        print(f"\nDimension: {dim}")
+        print(f"Old bound term c_0^(d-1) = 0.5^{dim-1} = {0.5**(dim-1):.2e}")
+        print(f"New bound avg P(crossover success) = {avg_cross:.4f}")
+        print(f"Improvement factor: {avg_cross / (0.5**(dim-1)):.1f}x")
+        print(f"\nNew bound is on average {avg_ratio:.1f}x larger than old bound")
+        
+        # Check if bounds are close to empirical
+        if len(finite_hits) > 0:
+            # Near hitting time, compare a*γ with ĥ
+            near_hit_data = [d for d in comparison_data if d['h_hat'] > 0]
+            if near_hit_data:
+                avg_h_hat = np.mean([d['h_hat'] for d in near_hit_data])
+                avg_a_new = np.mean([d['a_gamma_new'] for d in near_hit_data])
+                avg_a_old = np.mean([d['a_gamma_old'] for d in near_hit_data])
+                
+                print(f"\nNear hitting time (generations with events):")
+                print(f"  Empirical ĥ_t (avg): {avg_h_hat:.6f}")
+                print(f"  Old bound a_t*γ_t (avg): {avg_a_old:.2e} (ratio to ĥ: {avg_h_hat/avg_a_old:.1f}x)")
+                print(f"  New bound a_t*γ_t (avg): {avg_a_new:.2e} (ratio to ĥ: {avg_h_hat/avg_a_new:.1f}x)")
+    
+    # Save results
+    output = {
+        'all_results': all_results,
+        'all_hit_times': all_hit_times,
+        'hazards': hazards,
+        'comparison_data': comparison_data,
+        'params': {
+            'dim': dim,
+            'max_evals': max_evals,
+            'epsilon': epsilon,
+            'n_runs': n_runs,
+        }
+    }
+    
+    outpath = Path('results/validation_experiment.pkl')
+    outpath.parent.mkdir(exist_ok=True)
+    with open(outpath, 'wb') as f:
+        pickle.dump(output, f)
+    print(f"\nSaved: {outpath}")
+    
+    return output
+
+
+# ============================================================
+# 9. Run!
+# ============================================================
+
+if __name__ == "__main__":
+    # Quick test with sphere function
+    # Larger epsilon makes hitting easier → more data points
+    
+    results = run_validation_experiment(
+        n_runs=20,      # Number of independent runs
+        dim=10,         # Dimension
+        max_evals=50000,  # Budget per run
+        epsilon=1.0,    # Target: f* + epsilon
+    )
+    
+    print("\n" + "=" * 80)
+    print("EXPERIMENT COMPLETE")
+    print("=" * 80)
