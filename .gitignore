@@ -1,15 +1,21 @@
-# Data files (too large for git)
-*.pkl
-data/raw/*.pkl
-
 # Python
 __pycache__/
-*.pyc
-.ipynb_checkpoints/
+*.py[cod]
+*$py.class
+*.so
 
-# Results (regeneratable)
-results/*.png
-results/*.csv
+# Experiments (large files)
+experiments/
 
-# Environment
-.env
+# SLURM logs
+slurm/logs/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*~
+*.bak
+
+# OS
+.DS_Store
