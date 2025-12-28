@@ -1,1 +1,0 @@
-python benchmarks/r_benchmark.py --dim 10 --functions 5\,7\,8\,10\,11\,12\,13\,14\,15\,16\,17\,18\,19\,21\,22\,23\,24\,25\,26\,27\,28\,29\,30 --runs 51 --jobs 190 --max-evals 1000000 --seed-start 42 --outdir experiments/r_lshade_D10_nfev_1000000 
