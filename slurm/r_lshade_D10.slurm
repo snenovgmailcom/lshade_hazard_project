@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=r_D10
-#SBATCH --output=slurm/logs/%j_r_lshade_D10.out
-#SBATCH --error=slurm/logs/%j_r_lshade_D10.err
+#SBATCH --output=slurm/logs/%j_D10.out
+#SBATCH --error=slurm/logs/%j_D10.err
 #SBATCH --time=90:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -33,14 +33,14 @@ export VECLIB_MAXIMUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
 export PYTHONUNBUFFERED=1
 
-OUTDIR="experiments/r_lshade_D10_nfev_100000"
+OUTDIR="experiments/D10"
 mkdir -p "$OUTDIR"
 
 echo "=== R-LSHADE D=10 started at $(date) on $(hostname) ==="
 echo "Output dir: $OUTDIR"
 
 CMD=(
-  python benchmarks/r_benchmark.py
+  python benchmarks/benchmark.py
   --dim 10
   --functions all
   --runs 51

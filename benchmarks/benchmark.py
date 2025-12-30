@@ -31,7 +31,7 @@ ALGO = ROOT / "algorithms"
 sys.path.insert(0, str(ALGO))
 
 try:
-    from r_lshade import LSHADE  # type: ignore
+    from lshade import LSHADE  # type: ignore
 except ImportError:
     print("ERROR: r_lshade.py not found in algorithms/ directory.")
     sys.exit(1)
