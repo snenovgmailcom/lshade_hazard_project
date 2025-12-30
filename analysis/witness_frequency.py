@@ -10,7 +10,7 @@ cannot be verified from algorithm state alone.
 """
 
 import numpy as np
-from scipy.stats import cauchy, norm
+from scipy.stats import cauchy, norm, beta, binom
 from typing import Dict, List, Optional, Tuple, Any
 
 
@@ -149,6 +149,88 @@ def compute_witness_indicators(
     return indicators, l2_indicators, l3_indicators
 
 
+# =============================================================================
+# Clopper-Pearson Confidence Bounds
+# =============================================================================
+
+def clopper_pearson_lower(
+    k: int,
+    n: int,
+    alpha: float = 0.05
+) -> float:
+    """
+    Compute Clopper-Pearson lower confidence bound for binomial proportion.
+    
+    For k successes out of n trials, returns the lower (1-alpha) bound.
+    
+    Uses the relationship between binomial and beta distributions:
+        Lower bound = BetaInv(alpha; k, n-k+1)
+    
+    Args:
+        k: Number of successes
+        n: Number of trials
+        alpha: Significance level (default 0.05 for 95% CI)
+    
+    Returns:
+        Lower confidence bound for the proportion k/n
+    """
+    if k == 0:
+        return 0.0
+    if k == n:
+        return beta.ppf(alpha, k, 1)
+    return beta.ppf(alpha, k, n - k + 1)
+
+
+def clopper_pearson_upper(
+    k: int,
+    n: int,
+    alpha: float = 0.05
+) -> float:
+    """
+    Compute Clopper-Pearson upper confidence bound for binomial proportion.
+    
+    For k successes out of n trials, returns the upper (1-alpha) bound.
+    
+    Uses the relationship:
+        Upper bound = BetaInv(1-alpha; k+1, n-k)
+    
+    Args:
+        k: Number of successes
+        n: Number of trials
+        alpha: Significance level (default 0.05 for 95% CI)
+    
+    Returns:
+        Upper confidence bound for the proportion k/n
+    """
+    if k == n:
+        return 1.0
+    if k == 0:
+        return beta.ppf(1 - alpha, 1, n)
+    return beta.ppf(1 - alpha, k + 1, n - k)
+
+
+def clopper_pearson_interval(
+    k: int,
+    n: int,
+    alpha: float = 0.05
+) -> Tuple[float, float]:
+    """
+    Compute two-sided Clopper-Pearson confidence interval.
+    
+    Args:
+        k: Number of successes
+        n: Number of trials
+        alpha: Total significance level (default 0.05 for 95% CI)
+    
+    Returns:
+        Tuple (lower, upper) confidence bounds
+    """
+    return (
+        clopper_pearson_lower(k, n, alpha / 2),
+        clopper_pearson_upper(k, n, alpha / 2)
+    )
+
+
 def estimate_gamma(
     runs: List[Dict],
     taus: np.ndarray,
@@ -256,6 +338,139 @@ def estimate_gamma(
     }
 
 
+def estimate_gamma_with_ci(
+    runs: List[Dict],
+    taus: np.ndarray,
+    alpha: float = 0.05,
+    F_minus: float = 0.1,
+    F_plus: float = 0.9,
+    g_minus: float = 0.1,
+    c_cr: float = 0.5,
+    q_minus: float = 0.25,
+    sigma_f: float = 0.1,
+    sigma_cr: float = 0.1
+) -> Dict[str, Any]:
+    """
+    Estimate gamma_t with Clopper-Pearson confidence bounds.
+    
+    Extends estimate_gamma() with conservative (1-alpha) confidence bounds.
+    
+    Under independent runs, M_t^L | Y_t ~ Binomial(Y_t, gamma_t^partial).
+    
+    Args:
+        runs: List of run dictionaries with 'history' key
+        taus: Array of hitting times for these runs
+        alpha: Significance level for confidence bounds
+        Other args: Threshold parameters
+    
+    Returns:
+        Dictionary with all fields from estimate_gamma() plus:
+        - gamma_lower: array of Clopper-Pearson lower bounds
+        - gamma_upper: array of Clopper-Pearson upper bounds
+        - M_t: array of witness counts (numerator)
+    """
+    # Check if history is available
+    has_history = all('history' in r and r['history'] is not None for r in runs)
+    if not has_history:
+        return {
+            'generations': None,
+            'gamma_t': None,
+            'gamma_lower': None,
+            'gamma_upper': None,
+            'M_t': None,
+            'l2_rate': None,
+            'l3_rate': None,
+            'Y_t': None,
+            'gamma_mean': None,
+            'gamma_lower_mean': None,
+            'error': 'No history logged in runs'
+        }
+    
+    # Compute witness indicators for each run
+    all_indicators = []
+    all_l2 = []
+    all_l3 = []
+    
+    for r in runs:
+        ind, l2, l3 = compute_witness_indicators(
+            r['history'], F_minus, F_plus, g_minus, c_cr, q_minus, sigma_f, sigma_cr
+        )
+        all_indicators.append(ind)
+        all_l2.append(l2)
+        all_l3.append(l3)
+    
+    # Find max generations
+    max_gen = max(len(ind) for ind in all_indicators)
+    
+    # Estimate gamma_t on risk sets with confidence bounds
+    gamma_t = []
+    gamma_lower = []
+    gamma_upper = []
+    M_t_list = []
+    l2_rate = []
+    l3_rate = []
+    Y_t_list = []
+    
+    for t in range(1, max_gen + 1):
+        # Risk set: runs with tau >= t (not yet hit by generation t)
+        at_risk_indices = [i for i, tau in enumerate(taus) if tau >= t]
+        Y_t = len(at_risk_indices)
+        
+        if Y_t == 0:
+            gamma_t.append(np.nan)
+            gamma_lower.append(np.nan)
+            gamma_upper.append(np.nan)
+            M_t_list.append(0)
+            l2_rate.append(np.nan)
+            l3_rate.append(np.nan)
+            Y_t_list.append(0)
+            continue
+        
+        witness_count = 0
+        l2_count = 0
+        l3_count = 0
+        
+        for idx in at_risk_indices:
+            if t - 1 < len(all_indicators[idx]):
+                witness_count += int(all_indicators[idx][t - 1])
+                l2_count += int(all_l2[idx][t - 1])
+                l3_count += int(all_l3[idx][t - 1])
+        
+        # Point estimate
+        gamma_t.append(witness_count / Y_t)
+        M_t_list.append(witness_count)
+        
+        # Clopper-Pearson bounds
+        lower, upper = clopper_pearson_interval(witness_count, Y_t, alpha)
+        gamma_lower.append(lower)
+        gamma_upper.append(upper)
+        
+        l2_rate.append(l2_count / Y_t)
+        l3_rate.append(l3_count / Y_t)
+        Y_t_list.append(Y_t)
+    
+    gamma_t = np.array(gamma_t)
+    gamma_lower = np.array(gamma_lower)
+    gamma_upper = np.array(gamma_upper)
+    
+    return {
+        'generations': np.arange(1, max_gen + 1),
+        'gamma_t': gamma_t,
+        'gamma_lower': gamma_lower,
+        'gamma_upper': gamma_upper,
+        'M_t': np.array(M_t_list),
+        'l2_rate': np.array(l2_rate),
+        'l3_rate': np.array(l3_rate),
+        'Y_t': np.array(Y_t_list),
+        'gamma_mean': float(np.nanmean(gamma_t)),
+        'gamma_lower_mean': float(np.nanmean(gamma_lower)),
+        'gamma_upper_mean': float(np.nanmean(gamma_upper)),
+        'l2_mean': float(np.nanmean(l2_rate)),
+        'l3_mean': float(np.nanmean(l3_rate)),
+        'alpha': alpha,
+    }
+
+
 def compute_theoretical_a_t(
     d: int,
     H: int = 6,
@@ -283,8 +498,6 @@ def compute_theoretical_a_t(
     Returns:
         Dictionary with a_t and component values
     """
-    from scipy.stats import binom
-    
     N_init = 18 * d
     m_t = max(1, int(np.ceil(p * N_init)))
     s1 = N_init - 2

@@ -5,6 +5,9 @@ Gap analysis: comparing theoretical bounds to empirical hazard rates.
 This module computes the gap factor between:
 - Theoretical hazard floor: a_t * gamma_t
 - Empirical hazard: p_hat from KM analysis
+
+It also provides plug-in tail certificates using the theoretical bound
+with empirically estimated gamma_t values.
 """
 
 import numpy as np
@@ -139,4 +142,272 @@ def format_gap_table_row(
         'gap_factor': gap_analysis.get('gap_factor'),
         'log10_gap': gap_analysis.get('log10_gap'),
         'clustering': km_stats.get('clustering'),
+    }
+
+
+# =============================================================================
+# Plug-in Tail Certificates
+# =============================================================================
+
+def compute_plugin_survival_bound(
+    a_t: float,
+    gamma_t: np.ndarray,
+    P_E0c: float = 1.0
+) -> np.ndarray:
+    """
+    Compute plug-in witness-based survival upper bound.
+    
+    From equation (S-witness):
+        S_L(n) = P(E_0^c) * exp(-sum_{t=1}^{n} a_t * gamma_t)
+    
+    Args:
+        a_t: Theoretical hazard floor (constant per generation)
+        gamma_t: Array of estimated gamma values (one per generation)
+        P_E0c: Probability of favorable initialization (default 1.0)
+    
+    Returns:
+        Array of S_L(n) values for n = 1, ..., len(gamma_t)
+    """
+    # Replace NaN with 0 (conservative: assume no witness if unknown)
+    gamma_clean = np.where(np.isnan(gamma_t), 0.0, gamma_t)
+    
+    # Cumulative sum of a_t * gamma_t
+    cumsum = np.cumsum(a_t * gamma_clean)
+    
+    # S_L(n) = P(E_0^c) * exp(-cumsum)
+    S_L = P_E0c * np.exp(-cumsum)
+    
+    return S_L
+
+
+def compute_plugin_survival_lcb(
+    a_t: float,
+    gamma_lower: np.ndarray,
+    P_E0c: float = 1.0
+) -> np.ndarray:
+    """
+    Compute conservative plug-in survival bound using lower confidence bound on gamma.
+    
+    From equation (S-witness-LCB):
+        S_L_LCB(n) = P(E_0^c) * exp(-sum_{t=1}^{n} a_t * underline{gamma}_t)
+    
+    Uses Clopper-Pearson lower bounds for gamma_t to provide a conservative
+    (higher) survival estimate.
+    
+    Args:
+        a_t: Theoretical hazard floor (constant per generation)
+        gamma_lower: Array of lower confidence bounds for gamma
+        P_E0c: Probability of favorable initialization (default 1.0)
+    
+    Returns:
+        Array of S_L_LCB(n) values for n = 1, ..., len(gamma_lower)
+    """
+    # Replace NaN with 0 (conservative: assume no witness if unknown)
+    gamma_clean = np.where(np.isnan(gamma_lower), 0.0, gamma_lower)
+    
+    # Cumulative sum of a_t * gamma_lower
+    cumsum = np.cumsum(a_t * gamma_clean)
+    
+    # S_L_LCB(n) = P(E_0^c) * exp(-cumsum)
+    S_L_LCB = P_E0c * np.exp(-cumsum)
+    
+    return S_L_LCB
+
+
+def compute_tail_certificates(
+    a_t: float,
+    gamma_stats: Dict[str, Any],
+    P_E0c: float = 1.0
+) -> Dict[str, Any]:
+    """
+    Compute all plug-in tail certificates.
+    
+    Args:
+        a_t: Theoretical hazard floor
+        gamma_stats: Output from estimate_gamma_with_ci()
+        P_E0c: Probability of favorable initialization
+    
+    Returns:
+        Dictionary with:
+        - generations: generation indices
+        - S_L: witness-based survival bound (using gamma_t)
+        - S_L_LCB: conservative bound (using gamma_lower)
+        - final_S_L: S_L at last generation
+        - final_S_L_LCB: S_L_LCB at last generation
+    """
+    gamma_t = gamma_stats.get('gamma_t')
+    gamma_lower = gamma_stats.get('gamma_lower')
+    generations = gamma_stats.get('generations')
+    
+    if gamma_t is None or generations is None:
+        return {
+            'generations': None,
+            'S_L': None,
+            'S_L_LCB': None,
+            'final_S_L': None,
+            'final_S_L_LCB': None,
+            'error': 'Missing gamma estimates'
+        }
+    
+    # Compute witness-based bound
+    S_L = compute_plugin_survival_bound(a_t, gamma_t, P_E0c)
+    
+    # Compute conservative bound if lower bounds available
+    if gamma_lower is not None:
+        S_L_LCB = compute_plugin_survival_lcb(a_t, gamma_lower, P_E0c)
+    else:
+        S_L_LCB = None
+    
+    return {
+        'generations': generations,
+        'S_L': S_L,
+        'S_L_LCB': S_L_LCB,
+        'final_S_L': float(S_L[-1]) if len(S_L) > 0 else None,
+        'final_S_L_LCB': float(S_L_LCB[-1]) if S_L_LCB is not None and len(S_L_LCB) > 0 else None,
+        'a_t': a_t,
+        'P_E0c': P_E0c,
+    }
+
+
+def compare_bounds_to_km(
+    km_times: np.ndarray,
+    km_survival: np.ndarray,
+    certificates: Dict[str, Any]
+) -> Dict[str, Any]:
+    """
+    Compare plug-in certificates to empirical KM survival curve.
+    
+    Quantifies the conservatism of the theoretical bound.
+    
+    Args:
+        km_times: Event times from KM analysis
+        km_survival: KM survival estimates at event times
+        certificates: Output from compute_tail_certificates()
+    
+    Returns:
+        Dictionary with comparison metrics
+    """
+    generations = certificates.get('generations')
+    S_L = certificates.get('S_L')
+    S_L_LCB = certificates.get('S_L_LCB')
+    
+    if generations is None or S_L is None or km_times is None:
+        return {
+            'valid_bound': None,
+            'conservatism_factor': None,
+            'error': 'Missing data for comparison'
+        }
+    
+    # Check if theoretical bound is valid (S_L >= S_KM at all points)
+    # Interpolate KM to generation grid
+    km_at_gen = np.ones(len(generations))
+    for i, g in enumerate(generations):
+        # Find S_KM at generation g
+        idx = np.searchsorted(km_times, g)
+        if idx == 0:
+            km_at_gen[i] = 1.0  # Before first event
+        elif idx >= len(km_times):
+            km_at_gen[i] = km_survival[-1]
+        else:
+            km_at_gen[i] = km_survival[idx - 1]
+    
+    # Check validity: S_L should upper-bound survival (be >= empirical)
+    # But our bound is on P(tau > n), so S_L is an upper bound
+    # The theoretical guarantee is: P(tau > n) <= S_L(n)
+    # Empirical S_KM estimates P(tau > n)
+    # Valid if S_L >= S_KM at all points
+    valid_bound = np.all(S_L >= km_at_gen - 1e-10)  # Small tolerance for numerics
+    
+    # Conservatism: ratio of theoretical bound to empirical survival
+    # Higher ratio = more conservative
+    mask = km_at_gen > 0
+    if mask.sum() > 0:
+        ratios = S_L[mask] / km_at_gen[mask]
+        mean_conservatism = float(np.mean(ratios))
+        max_conservatism = float(np.max(ratios))
+    else:
+        mean_conservatism = None
+        max_conservatism = None
+    
+    return {
+        'valid_bound': bool(valid_bound),
+        'mean_conservatism': mean_conservatism,
+        'max_conservatism': max_conservatism,
+        'km_at_generations': km_at_gen,
+    }
+
+
+def compute_required_generations(
+    a_t: float,
+    gamma_mean: float,
+    target_survival: float = 0.01,
+    P_E0c: float = 1.0
+) -> Optional[int]:
+    """
+    Compute generations required to guarantee survival <= target.
+    
+    Solves: P(E_0^c) * exp(-n * a_t * gamma) <= target_survival
+    
+    Args:
+        a_t: Theoretical hazard floor
+        gamma_mean: Mean witness frequency
+        target_survival: Target upper bound on survival probability
+        P_E0c: Probability of favorable initialization
+    
+    Returns:
+        Minimum n such that S_L(n) <= target_survival, or None if impossible
+    """
+    if a_t <= 0 or gamma_mean <= 0:
+        return None
+    
+    if P_E0c <= target_survival:
+        return 0  # Already satisfied
+    
+    # P_E0c * exp(-n * a_t * gamma) <= target
+    # exp(-n * a_t * gamma) <= target / P_E0c
+    # -n * a_t * gamma <= log(target / P_E0c)
+    # n >= -log(target / P_E0c) / (a_t * gamma)
+    
+    n = -np.log(target_survival / P_E0c) / (a_t * gamma_mean)
+    
+    return int(np.ceil(n))
+
+
+def format_certificate_summary(
+    fname: str,
+    d: int,
+    eps: float,
+    km_stats: Dict,
+    gamma_stats: Dict,
+    certificates: Dict,
+    comparison: Dict
+) -> Dict[str, Any]:
+    """
+    Format summary row for plug-in certificate table.
+    
+    Args:
+        fname: Function name
+        d: Dimension
+        eps: Epsilon tolerance
+        km_stats: KM statistics
+        gamma_stats: Gamma estimation results
+        certificates: Plug-in certificate results
+        comparison: Comparison metrics
+    
+    Returns:
+        Dictionary suitable for DataFrame row
+    """
+    return {
+        'function': fname,
+        'd': d,
+        'eps': eps,
+        'n_hits': km_stats.get('n_hits'),
+        'tau_max': km_stats.get('tau_max'),
+        'gamma_mean': gamma_stats.get('gamma_mean'),
+        'gamma_lower_mean': gamma_stats.get('gamma_lower_mean'),
+        'a_t': certificates.get('a_t'),
+        'final_S_L': certificates.get('final_S_L'),
+        'final_S_L_LCB': certificates.get('final_S_L_LCB'),
+        'valid_bound': comparison.get('valid_bound'),
+        'mean_conservatism': comparison.get('mean_conservatism'),
     }
