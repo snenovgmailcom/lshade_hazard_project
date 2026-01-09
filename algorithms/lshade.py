@@ -1,20 +1,6 @@
 #!/usr/bin/env python3
 """
 Pure classical L-SHADE (Tanabe & Fukunaga, 2014)
-
-References:
-    R. Tanabe and A. Fukunaga,
-    "Improving the Search Performance of SHADE Using
-     Linear Population Size Reduction",
-    IEEE CEC 2014.
-
-This implementation:
-    - Follows Algorithm 2 (L-SHADE) exactly
-    - Uses Lehmer mean for F (Eq. 7)
-    - Uses weighted Lehmer mean for CR (Eq. 7)
-    - Uses Linear Population Size Reduction (Eq. 10)
-    - Uses midpoint bound handling (Eq. 4)
-    - Uses PCG64 RNG for reproducibility
 """
 
 import numpy as np
@@ -42,15 +28,12 @@ class LSHADE:
         self.bounds = np.array(bounds, float)
         self.dim = len(bounds)
 
-        # Table II
         self.N_init = popsize if popsize is not None else 18 * self.dim
         self.N_min = N_min
         self.popsize = self.N_init
 
-        # Eq. (10)
         self.max_evals = max_evals if max_evals is not None else 10000 * self.dim
 
-        # Algorithm 1: parameter memories
         self.memory_size = memory_size
         self.memory_f = np.full(memory_size, 0.5)
         self.memory_cr = np.full(memory_size, 0.5, dtype=object)
@@ -61,17 +44,14 @@ class LSHADE:
         self.p_best_rate = p_best_rate
         self.arc_rate = arc_rate
 
-        # Archive (Section II-D)
         self.archive_capacity = int(round(self.arc_rate * self.N_init))
         self.archive = []
 
         self.atol = atol
         self.disp = disp
 
-        # RNG
         self.rng = np.random.Generator(np.random.PCG64(seed))
 
-        # Counters
         self.nfev = 0
         self.nit = 0
 
@@ -79,34 +59,34 @@ class LSHADE:
         self.best_individual = None
         self.convergence = []
 
-        # History logging for witness frequency estimation
         self.history = {
-            'memory_f': [],      # List of memory_f arrays per generation
-            'memory_cr': [],     # List of memory_cr arrays per generation
-            'pop_size': [],      # Population size per generation
-            'archive_size': [],  # Archive size per generation
+            "memory_f": [],
+            "memory_cr": [],
+            "pop_size": [],
+            "archive_size": [],
+            "positions": [],
+            "fitness": [],
+            "x_best": [],
+            "f_best": [],
+            "all_F": [],
+            "all_CR": [],
+            "successful_F": [],
+            "successful_CR": [],
+            "delta_f": [],
+            "trial_fitness_best": [],  # NEW: f(u_{t,b}) for validation
         }
 
-    # ------------------------------------------------------------
-    # Algorithm 2, line 2: Initialize population
-    # ------------------------------------------------------------
     def _initialize_population(self):
         lower = self.bounds[:, 0]
         upper = self.bounds[:, 1]
         return self.rng.uniform(lower, upper, (self.N_init, self.dim))
 
-    # ------------------------------------------------------------
-    # Eq. (10): Linear Population Size Reduction
-    # ------------------------------------------------------------
     def _compute_target_pop_size(self):
         ratio = (self.max_evals - self.nfev) / self.max_evals
         ratio = np.clip(ratio, 0.0, 1.0)
         N_target = self.N_min + (self.N_init - self.N_min) * ratio
         return max(self.N_min, int(round(N_target)))
 
-    # ------------------------------------------------------------
-    # Algorithm 2, lines 21–24: Shrink population
-    # ------------------------------------------------------------
     def _shrink_population(self, pop, fit):
         N_target = self._compute_target_pop_size()
         current = len(pop)
@@ -126,9 +106,6 @@ class LSHADE:
 
         return pop, fit
 
-    # ------------------------------------------------------------
-    # Eq. (4): Bound handling (midpoint)
-    # ------------------------------------------------------------
     def _bound_constrain(self, mutant, parent):
         lower = self.bounds[:, 0]
         upper = self.bounds[:, 1]
@@ -142,19 +119,12 @@ class LSHADE:
 
         return result
 
-    # ------------------------------------------------------------
-    # Section II-D: External archive
-    # ------------------------------------------------------------
     def _update_archive(self, individual):
-        # Algorithm 2 / Section II-D: insert then, if needed, delete random entries
         self.archive.append(individual)
         if len(self.archive) > self.archive_capacity:
             idx = self.rng.integers(0, len(self.archive))
             del self.archive[idx]
 
-    # ------------------------------------------------------------
-    # Algorithm 1: Memory update (Eq. 7, 8, 9)
-    # ------------------------------------------------------------
     def _update_memory(self, successful_f, successful_cr, delta_f):
         if len(successful_f) == 0:
             return
@@ -169,38 +139,64 @@ class LSHADE:
         if total_delta <= 0:
             return
 
-        w = delta / total_delta  # Eq. (9)
+        w = delta / total_delta
 
-        # Eq. (7)-(9): Lehmer mean for F
         mean_f = np.sum(w * (s_f ** 2)) / (np.sum(w * s_f) + 1e-12)
         mean_f = float(np.clip(mean_f, 0.0, 1.0))
         self.memory_f[k] = mean_f
 
         if self.memory_cr[k] is None or np.max(s_cr) == 0.0:
-            self.memory_cr[k] = None  # terminal value ⊥
+            self.memory_cr[k] = None
         else:
-            # Eq. (7)-(9): weighted Lehmer mean for CR (meanWL)
             mean_cr = np.sum(w * (s_cr ** 2)) / (np.sum(w * s_cr) + 1e-12)
             self.memory_cr[k] = float(np.clip(mean_cr, 0.0, 1.0))
 
         self.memory_pos = (self.memory_pos + 1) % self.memory_size
 
-    # ------------------------------------------------------------
-    # Log current state for witness frequency estimation
-    # ------------------------------------------------------------
-    def _log_state(self, pop):
-        self.history['memory_f'].append(self.memory_f.copy())
-        self.history['memory_cr'].append(
+    def _log_state(self, pop, fit, all_F, all_CR, successful_f, successful_cr, delta_f, trial_fitness_best):
+        self.history["memory_f"].append(self.memory_f.copy())
+        self.history["memory_cr"].append(
             np.array([m if m is not None else np.nan for m in self.memory_cr])
         )
-        self.history['pop_size'].append(len(pop))
-        self.history['archive_size'].append(len(self.archive))
+        self.history["pop_size"].append(len(pop))
+        self.history["archive_size"].append(len(self.archive))
+        self.history["positions"].append(pop.copy())
+        self.history["fitness"].append(fit.copy())
+        best_idx = np.argmin(fit)
+        self.history["x_best"].append(pop[best_idx].copy())
+        self.history["f_best"].append(float(fit[best_idx]))
+        self.history["all_F"].append(np.array(all_F))
+        self.history["all_CR"].append(np.array(all_CR))
+        self.history["successful_F"].append(np.array(successful_f))
+        self.history["successful_CR"].append(np.array(successful_cr))
+        self.history["delta_f"].append(np.array(delta_f))
+        self.history["trial_fitness_best"].append(trial_fitness_best)  # NEW
 
-    # ------------------------------------------------------------
-    # One generation of L-SHADE
-    # ------------------------------------------------------------
+    def _log_initial_state(self, pop, fit):
+        self.history["memory_f"].append(self.memory_f.copy())
+        self.history["memory_cr"].append(
+            np.array([m if m is not None else np.nan for m in self.memory_cr])
+        )
+        self.history["pop_size"].append(len(pop))
+        self.history["archive_size"].append(len(self.archive))
+        self.history["positions"].append(pop.copy())
+        self.history["fitness"].append(fit.copy())
+        best_idx = np.argmin(fit)
+        self.history["x_best"].append(pop[best_idx].copy())
+        self.history["f_best"].append(float(fit[best_idx]))
+        self.history["all_F"].append(np.array([]))
+        self.history["all_CR"].append(np.array([]))
+        self.history["successful_F"].append(np.array([]))
+        self.history["successful_CR"].append(np.array([]))
+        self.history["delta_f"].append(np.array([]))
+        self.history["trial_fitness_best"].append(np.nan)  # NEW: no trial at t=0
+
     def _lshade_generation(self, pop, fit):
         NP = len(pop)
+
+        # NEW: identify best individual at start of generation
+        best_idx_start = int(np.argmin(fit))
+        trial_fitness_best = np.nan  # will be set when i == best_idx_start
 
         new_pop = []
         new_fit = []
@@ -208,17 +204,20 @@ class LSHADE:
         successful_f = []
         successful_cr = []
         delta_f = []
+        all_F = []
+        all_CR = []
 
         for i in range(NP):
             if self.nfev >= self.max_evals:
                 for j in range(i, NP):
                     new_pop.append(pop[j])
                     new_fit.append(fit[j])
+                    all_F.append(np.nan)
+                    all_CR.append(np.nan)
                 break
 
             r = self.rng.integers(0, self.memory_size)
 
-            # Eq. (2): F ~ Cauchy
             while True:
                 F = cauchy.rvs(
                     loc=self.memory_f[r],
@@ -230,25 +229,23 @@ class LSHADE:
                 if F > 0:
                     break
 
-            # Eq. (1): CR ~ Normal (randn) + boundary clipping
             mu = self.memory_cr[r]
 
             if mu is None:
-                # terminal CR ⊥
                 CR = 0.0
             else:
                 CR = float(self.rng.normal(mu, self.sigma_cr))
                 CR = float(np.clip(CR, 0.0, 1.0))
 
-            # p-best selection
+            all_F.append(F)
+            all_CR.append(CR)
+
             p_num = max(2, int(np.ceil(self.p_best_rate * NP)))
             pbest_pool = np.argsort(fit)[:p_num]
             pbest_idx = self.rng.choice(pbest_pool)
 
-            # r1
             r1 = self.rng.choice([j for j in range(NP) if j != i])
 
-            # r2 from population ∪ archive
             total = NP + len(self.archive)
             candidates = [j for j in range(total) if j != i and j != r1]
             if not candidates:
@@ -259,7 +256,6 @@ class LSHADE:
             r2 = self.rng.choice(candidates)
             x_r2 = pop[r2] if r2 < NP else self.archive[r2 - NP]
 
-            # Eq. (3): Mutation
             mutant = (
                 pop[i]
                 + F * (pop[pbest_idx] - pop[i])
@@ -268,7 +264,6 @@ class LSHADE:
 
             mutant = self._bound_constrain(mutant, pop[i])
 
-            # Eq. (5): Binomial crossover
             trial = pop[i].copy()
             j_rand = self.rng.integers(0, self.dim)
             for j in range(self.dim):
@@ -278,13 +273,16 @@ class LSHADE:
             f_trial = float(self.func(trial))
             self.nfev += 1
 
-            # Eq. (6): Selection
+            # NEW: record trial fitness for best individual
+            if i == best_idx_start:
+                trial_fitness_best = f_trial
+
             if f_trial <= fit[i]:
                 new_pop.append(trial)
                 new_fit.append(f_trial)
 
                 if f_trial < fit[i]:
-                    self._update_archive(pop[i].copy()) # Eq. (6)
+                    self._update_archive(pop[i].copy())
                     successful_f.append(F)
                     successful_cr.append(CR)
                     delta_f.append(fit[i] - f_trial)
@@ -299,14 +297,10 @@ class LSHADE:
 
         new_pop, new_fit = self._shrink_population(new_pop, new_fit)
 
-        # Log state after generation
-        self._log_state(new_pop)
+        self._log_state(new_pop, new_fit, all_F, all_CR, successful_f, successful_cr, delta_f, trial_fitness_best)
 
         return new_pop, new_fit
 
-    # ------------------------------------------------------------
-    # Main loop
-    # ------------------------------------------------------------
     def solve(self):
         pop = self._initialize_population()
         fit = np.array([self.func(x) for x in pop])
@@ -317,8 +311,7 @@ class LSHADE:
         self.best_individual = pop[best_idx].copy()
         self.convergence.append(self.best_fitness)
 
-        # Log initial state
-        self._log_state(pop)
+        self._log_initial_state(pop, fit)
 
         if self.disp:
             print(f"Initial best = {self.best_fitness:.6e}")

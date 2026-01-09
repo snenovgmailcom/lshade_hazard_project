@@ -1,0 +1,64 @@
+{
+  "meta": {
+    "func": "f1",
+    "f_star": 100.0,
+    "eps": 10.0,
+    "eps_quarter": 2.5,
+    "F_minus": 0.1,
+    "F_plus": 0.9,
+    "Delta_F": 0.8,
+    "window": 20,
+    "dim": 10,
+    "H": 6,
+    "c_cr": 0.5,
+    "eta_r": 0.5,
+    "r_conc": 1.0,
+    "n_runs": 51,
+    "n_valid": 51,
+    "formula": "a_tilde = (c_pair/H) \u00d7 (g_minus \u00d7 Delta_F) \u00d7 (q_minus \u00d7 eta_r)"
+  },
+  "hitting_times": {
+    "tau_eps_median": 186.0,
+    "tau_eps4_median": 197.0
+  },
+  "validation": {
+    "n_cond_samples": 1071,
+    "n_success": 677,
+    "p_empirical": 0.6321195144724556,
+    "a_tilde": {
+      "median": 0.013804512878417703,
+      "mean": 0.013392737886516222,
+      "min": 0.0050558927766199665,
+      "max": 0.014274308043280962
+    },
+    "ratio": 45.7907874069737,
+    "bound_satisfied": true,
+    "components": {
+      "c_pair": {
+        "median": 1.0,
+        "min": 0.405663378937321,
+        "max": 1.0
+      },
+      "g_minus": {
+        "median": 0.20776915178487762,
+        "min": 0.15370464583851984,
+        "max": 0.21411518773639576
+      },
+      "g_minus_Delta_F": {
+        "median": 0.1662153214279021,
+        "min": 0.12296371667081588,
+        "max": 0.17129215018911662
+      },
+      "q_minus": {
+        "median": 0.9999952102024743,
+        "min": 0.9999587446145203,
+        "max": 0.9999991714293281
+      },
+      "beta1": {
+        "median": 0.9180327868852459,
+        "min": 0.408,
+        "max": 1.0
+      }
+    }
+  }
+}

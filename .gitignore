@@ -20,3 +20,14 @@ slurm/logs/
 
 # OS
 .DS_Store
+
+# Large PKL files
+*.pkl
+
+# Backup files
+*.bak
+*~
+
+# Test experiments
+experiments/test_*/
+experiments/*_partial_*/

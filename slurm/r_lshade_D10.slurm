@@ -6,7 +6,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=180
-#SBATCH --mem=32G
+#SBATCH --mem=64G
 #SBATCH --partition=compute
 #SBATCH --mail-user=nenov@uctm.edu
 #SBATCH --mail-type=BEGIN,END,FAIL

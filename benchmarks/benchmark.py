@@ -4,7 +4,7 @@ Unified Benchmark: PURE classical L-SHADE on CEC2017.
 
 - Uses a global ProcessPoolExecutor over ALL (function, seed) tasks.
 - Same CLI and output structure as q_benchmark.py
-- Results go by default to: experiments/r_lshade_D{dim}/
+- Results go by default to: experiments/D{dim}/
 """
 
 import os
@@ -33,7 +33,7 @@ sys.path.insert(0, str(ALGO))
 try:
     from lshade import LSHADE  # type: ignore
 except ImportError:
-    print("ERROR: r_lshade.py not found in algorithms/ directory.")
+    print("ERROR: lshade.py not found in algorithms/ directory.")
     sys.exit(1)
 
 # ---------------------------------------------------------------------------
@@ -115,6 +115,37 @@ def plot_envelope(curves, out_path, title):
     plt.savefig(out_path)
     plt.close()
 
+
+def convert_history_for_pickle(history):
+    """
+    Convert history arrays to lists for efficient pickling.
+    
+    Handles all logged data:
+    - memory_f, memory_cr: list of arrays -> list of lists
+    - pop_size, archive_size: list of ints (unchanged)
+    - positions: list of (N_t, d) arrays -> list of lists
+    - fitness: list of (N_t,) arrays -> list of lists
+    - x_best: list of (d,) arrays -> list of lists
+    - f_best: list of floats (unchanged)
+    - all_F, all_CR: list of (N_t,) arrays -> list of lists
+    - successful_F, successful_CR, delta_f: list of arrays -> list of lists
+    """
+    converted = {}
+    
+    for key, val in history.items():
+        if isinstance(val, list) and len(val) > 0:
+            first = val[0]
+            if isinstance(first, np.ndarray):
+                # Convert numpy arrays to lists
+                converted[key] = [arr.tolist() for arr in val]
+            else:
+                # Keep as-is (scalars, already lists)
+                converted[key] = val
+        else:
+            converted[key] = val
+    
+    return converted
+
 # ---------------------------------------------------------------------------
 # Run a single LSHADE instance
 # ---------------------------------------------------------------------------
@@ -163,12 +194,7 @@ def run_single(seed,
         print(f"[WARNING] {fname} seed={seed}: final_pop={final_pop} < N_min={N_min}")
 
     # Convert history arrays to lists for pickling
-    history = {
-        'memory_f': [arr.tolist() for arr in res.history['memory_f']],
-        'memory_cr': [arr.tolist() for arr in res.history['memory_cr']],
-        'pop_size': res.history['pop_size'],
-        'archive_size': res.history['archive_size'],
-    }
+    history = convert_history_for_pickle(res.history)
 
     return {
         "function": fname,
@@ -235,7 +261,7 @@ def main():
 
     # Default outdir based on dim if not supplied
     if args.outdir is None:
-        args.outdir = os.path.join("experiments", f"r_lshade_D{args.dim}")
+        args.outdir = os.path.join("experiments", f"D{args.dim}")
     os.makedirs(args.outdir, exist_ok=True)
 
     # Select functions

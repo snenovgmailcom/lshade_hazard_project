@@ -1,229 +1,314 @@
 #!/usr/bin/env python3
-"""
-Kaplan-Meier survival analysis for L-SHADE hitting times.
+r"""
+km_analysis.py
 
-This module provides functions to:
-- Compute hitting times from convergence curves
-- Estimate survival functions via Kaplan-Meier
-- Compute geometric envelope rates and clustering indices
+Kaplan–Meier (KM) and discrete-time hazard utilities used by the empirical
+section of the paper.
+
+This module implements the discrete-time notation from Appendix
+"Discrete-time survival notation and Kaplan–Meier estimator" and the
+tail-envelope diagnostics used later.
+
+Conventions (consistent with CEC/L-SHADE logging):
+- Generations are indexed by integers t = 0,1,...,B where B is the last logged
+  generation (typically len(curve)-1).
+- The hitting time tau is the smallest t such that f_best(t) <= f* + eps.
+  If the target is never hit within budget, tau = +inf (right-censored).
+- Observed time is \tilde{tau} = min(tau, B), and delta = 1{tau <= B}.
+
+KM risk set and event counts:
+- Y_t = #{runs with \tilde{tau} >= t}
+- d_t = #{runs with \tilde{tau} = t and delta = 1}
+
+The (discrete-time) KM survival is:
+  \hat S(t) = prod_{s=0}^t (1 - d_s / Y_s), with \hat S(-1) := 1.
+
+Tail "constant hazard" pooling (Appendix "Conservative post-T tail envelopes"):
+Given a tail start T (integer, 0<=T<=B), define:
+  D(T)      = sum_{t=T+1}^B d_t
+  N_trial(T)= sum_{t=T+1}^B Y_{t-1} = sum_{s=T}^{B-1} Y_s
+and the pooled MLE hazard:
+  \hat a(T) = D(T) / N_trial(T).
+
+We also provide:
+- a_one_sided_lcb(T): one-sided Clopper–Pearson lower bound on a(T)
+  (optional, for "validated" conservative rates).
+- a_env(T): minimal geometric-envelope rate a such that for all t>=T,
+    \hat S(t) <= \hat S(T) * (1-a)^{t-T}
+  (deterministic diagnostic of temporal clustering / hazard nonstationarity).
+
+These quantities are useful for reporting and for comparing with the paper's
+theoretical per-generation hazard lower bounds.
 """
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
-from typing import Dict, List, Optional, Tuple, Any
+from scipy.stats import beta
 
 
-# CEC2017 global optima
-CEC2017_OPTIMA = {f"cec2017_f{i}": 100.0 * i for i in range(1, 31)}
+# ----------------------------
+# Core utilities
+# ----------------------------
 
-
-def compute_hitting_times(
-    curves: List[np.ndarray],
-    f_global: float,
-    eps_values: List[float]
-) -> Dict[float, np.ndarray]:
+def compute_hitting_times(curves: List[np.ndarray], f_star: float, eps: float) -> np.ndarray:
     """
-    Compute hitting times for multiple epsilon values.
-    
-    Args:
-        curves: List of convergence curves (best-so-far per generation)
-        f_global: Global optimum value
-        eps_values: List of epsilon tolerances
-    
-    Returns:
-        Dictionary mapping eps -> array of hitting times (np.inf if no hit)
+    Compute per-run hitting times:
+      tau = inf{ t : f_best(t) <= f_star + eps }.
+    Returns an array of length R with tau in {0,1,...,B} or np.inf.
     """
-    result = {}
-    for eps in eps_values:
-        taus = []
-        for curve in curves:
-            curve = np.asarray(curve)
-            hits = np.where(curve <= f_global + eps)[0]
-            if len(hits) > 0:
-                taus.append(hits[0] + 1)  # 1-indexed generations
-            else:
-                taus.append(np.inf)
-        result[eps] = np.array(taus)
-    return result
+    taus: List[float] = []
+    threshold = f_star + float(eps)
+
+    for curve in curves:
+        # curve is best-so-far objective; assume 1D array indexed by generation
+        hit_idx = np.where(np.asarray(curve) <= threshold)[0]
+        if len(hit_idx) == 0:
+            taus.append(np.inf)
+        else:
+            taus.append(float(hit_idx[0]))
+    return np.asarray(taus, dtype=float)
 
 
-def kaplan_meier(
-    taus: np.ndarray,
-    B: Optional[int] = None
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Compute Kaplan-Meier survival estimator.
-    
-    Args:
-        taus: Array of hitting times (np.inf for censored runs)
-        B: Budget (censoring time). If None, use max finite tau + 10.
-    
-    Returns:
-        times: Unique event times
-        survival: S(t) at each time
-        risk_sets: Y_t (number at risk) at each time
-        events: d_t (number of events) at each time
-    """
-    taus = np.asarray(taus)
-    
-    # Handle censoring
-    if B is None:
-        finite_taus = taus[np.isfinite(taus)]
-        B = int(finite_taus.max()) + 10 if len(finite_taus) > 0 else 1000
-    
-    T = np.minimum(taus, B)
-    delta = (taus <= B).astype(int)  # 1 if hit, 0 if censored
-    
-    # Get unique event times (where delta=1)
-    event_times = np.unique(T[delta == 1])
-    event_times = event_times[event_times > 0]
-    
-    if len(event_times) == 0:
-        return (
-            np.array([0, B]),
-            np.array([1.0, 1.0]),
-            np.array([len(taus), 0]),
-            np.array([0, 0])
-        )
-    
-    times = []
-    survival = []
-    risk_sets = []
-    events = []
-    
-    S = 1.0
-    for t in event_times:
-        Y_t = np.sum(T >= t)  # at risk
-        d_t = np.sum((T == t) & (delta == 1))  # events
-        
-        if Y_t > 0:
-            S = S * (1 - d_t / Y_t)
-        
-        times.append(t)
-        survival.append(S)
-        risk_sets.append(Y_t)
-        events.append(d_t)
-    
-    return (
-        np.array(times),
-        np.array(survival),
-        np.array(risk_sets),
-        np.array(events)
-    )
+@dataclass
+class KMResult:
+    times: np.ndarray        # integer times 0..B
+    Y: np.ndarray            # risk set Y_t
+    d: np.ndarray            # events d_t
+    S: np.ndarray            # KM survival \hat S(t) for t=0..B
+    hazard: np.ndarray       # discrete hazard estimate \hat p_t = d_t / Y_t (0 when Y_t=0)
 
+
+def kaplan_meier_discrete(taus: np.ndarray, B: int) -> KMResult:
+    """
+    Discrete-time Kaplan–Meier estimator on t=0..B.
+
+    Parameters
+    ----------
+    taus : array of shape (R,)
+        Hitting times per run; may contain np.inf for censored runs.
+    B : int
+        Budget in generations (last logged generation index).
+
+    Returns
+    -------
+    KMResult with arrays of length B+1.
+    """
+    taus = np.asarray(taus, dtype=float)
+    if B < 0:
+        raise ValueError("B must be nonnegative")
+
+    # observed time and event indicator
+    tilde = np.minimum(taus, float(B))
+    delta = (taus <= float(B)).astype(int)
+
+    times = np.arange(B + 1, dtype=int)
+
+    # risk set and events
+    # Y_t = #{tilde >= t}
+    Y = np.array([(tilde >= t).sum() for t in times], dtype=int)
+    # d_t = #{tilde == t and delta==1}
+    d = np.array([((tilde == t) & (delta == 1)).sum() for t in times], dtype=int)
+
+    # hazard p_t = d_t / Y_t (define 0 if Y_t=0)
+    hazard = np.zeros_like(times, dtype=float)
+    mask = Y > 0
+    hazard[mask] = d[mask] / Y[mask]
+
+    # KM survival
+    S = np.ones_like(times, dtype=float)
+    surv = 1.0
+    for t in times:
+        if Y[t] > 0:
+            surv *= (1.0 - d[t] / Y[t])
+        S[t] = surv
+
+    return KMResult(times=times, Y=Y, d=d, S=S, hazard=hazard)
+
+
+# ----------------------------
+# Tail pooling and envelopes
+# ----------------------------
+
+def _tail_counts(km: KMResult, T: int) -> Tuple[int, int]:
+    """
+    Return (D(T), N_trial(T)) as defined in the module docstring.
+    """
+    if T < 0 or T > int(km.times[-1]):
+        raise ValueError("T must satisfy 0 <= T <= B")
+
+    B = int(km.times[-1])
+
+    # D(T) = sum_{t=T+1}^B d_t
+    D = int(km.d[T+1 : B+1].sum()) if T < B else 0
+
+    # N_trial(T) = sum_{t=T+1}^B Y_{t-1} = sum_{s=T}^{B-1} Y_s
+    N_trial = int(km.Y[T : B].sum()) if T < B else 0
+
+    return D, N_trial
+
+
+def pooled_tail_hazard(km: KMResult, T: int) -> float:
+    """
+    Pooled MLE hazard \hat a(T) = D(T) / N_trial(T).
+    """
+    D, N_trial = _tail_counts(km, T)
+    if N_trial <= 0:
+        return 0.0
+    return float(D / N_trial)
+
+
+def clopper_pearson_lower(k: int, n: int, alpha: float = 0.05) -> float:
+    """
+    One-sided Clopper–Pearson lower confidence bound for a Binomial(n, p):
+      P(p >= L) >= 1 - alpha.
+
+    For k=0, the lower bound is 0.
+    """
+    if n <= 0:
+        return 0.0
+    if k <= 0:
+        return 0.0
+    if k > n:
+        raise ValueError("k cannot exceed n")
+    # One-sided lower bound: Beta(alpha; k, n-k+1)
+    return float(beta.ppf(alpha, k, n - k + 1))
+
+
+def pooled_tail_hazard_lcb(km: KMResult, T: int, alpha: float = 0.05) -> float:
+    """
+    One-sided (1-alpha) lower bound on the pooled tail hazard, by treating
+    D(T) as Binomial(N_trial(T), a).
+    """
+    D, N_trial = _tail_counts(km, T)
+    return clopper_pearson_lower(D, N_trial, alpha=alpha)
+
+
+def geometric_envelope_rate(km: KMResult, T: int) -> float:
+    """
+    Event-time geometric envelope rate a_env(T).
+
+    The paper's tail bound compares survival to a geometric decay.
+    In finite-sample discrete-time KM curves, \hat S(t) is a step function and is
+    often *flat* on generations with d_t=0. If we enforced the inequality at every
+    generation, any post-T flat segment would force a_env(T)=0, which is not a
+    useful diagnostic.
+
+    Therefore we compute the envelope **only over event times** (generations where
+    d_t>0), i.e. we maximize over t>T with d_t>0:
+        a_env(T) = 1 - max_{t>T, d_t>0} ( S(t) / S(T) )^{1/(t-T)}.
+
+    This is a deterministic shape diagnostic (not a confidence bound).
+    Returns 0.0 if S(T)=0 or there are no events after T.
+    """
+    B = int(km.times[-1])
+    if T < 0 or T > B:
+        raise ValueError("T must satisfy 0 <= T <= B")
+    if T == B:
+        return 0.0
+    S_T = float(km.S[T])
+    if S_T <= 0.0:
+        return 0.0
+
+    roots = []
+    for t in range(T + 1, B + 1):
+        # Skip flat segments (no observed events) to avoid collapsing a_env to 0.
+        if km.d[t] == 0:
+            continue
+        ratio = float(km.S[t]) / S_T
+        ratio = min(max(ratio, 0.0), 1.0)
+        if ratio >= 1.0 - 1e-15:
+            # numerical safety; an event time should have ratio < 1
+            continue
+        root = 0.0 if ratio <= 0.0 else ratio ** (1.0 / (t - T))
+        roots.append(root)
+
+    max_root = max(roots) if roots else 1.0
+    max_root = min(max(max_root, 0.0), 1.0)
+    return float(1.0 - max_root)
+
+
+# ----------------------------
+# Reporting helper
+# ----------------------------
 
 def compute_km_statistics(
     taus: np.ndarray,
-    B: Optional[int] = None
-) -> Dict[str, Any]:
+    B: int,
+    tail_start: Optional[int] = None,
+    alpha: float = 0.05,
+) -> Dict[str, float]:
     """
-    Compute comprehensive KM statistics for a set of hitting times.
-    
-    Args:
-        taus: Array of hitting times (np.inf for censored)
-        B: Budget for censoring
-    
-    Returns:
-        Dictionary with:
-        - n_runs, n_hits, hit_rate
-        - T_first, tau_min, tau_med, tau_max
-        - p_hat (MLE hazard)
-        - a_valid (tightest geometric envelope)
-        - clustering (a_valid / p_hat)
-        - km_times, km_survival (for plotting)
+    Compute headline KM / hazard statistics for a given tau sample.
+
+    Parameters
+    ----------
+    taus : array-like
+        Hitting times; np.inf for censored.
+    B : int
+        Budget generation index (last logged gen).
+    tail_start : int or None
+        Tail start T used in pooled hazard / envelopes. If None, we use
+        T = tau_first (first observed hit). If there are no hits, use 0.
+    alpha : float
+        For one-sided Clopper–Pearson LCB on the pooled tail hazard.
+
+    Returns a dict with keys:
+      n_hits, tau_first, tau_median, tau_max,
+      p_hat (pooled tail hazard), p_lcb (LCB),
+      a_env (event-time geometric envelope rate),
+      clustering (inverse coefficient of variation of inter-hit gaps).
     """
-    taus = np.asarray(taus)
-    finite_taus = taus[np.isfinite(taus)]
-    
-    n_runs = len(taus)
-    n_hits = len(finite_taus)
-    
-    if n_hits == 0:
-        return {
-            'n_runs': n_runs,
-            'n_hits': 0,
-            'hit_rate': 0.0,
-            'T_first': None,
-            'tau_min': None,
-            'tau_med': None,
-            'tau_max': None,
-            'p_hat': None,
-            'a_valid': None,
-            'clustering': None,
-            'km_times': None,
-            'km_survival': None,
-        }
-    
-    T_first = int(finite_taus.min())
-    tau_med = int(np.median(finite_taus))
-    tau_max = int(finite_taus.max())
-    
-    times, S, Y, d = kaplan_meier(taus, B)
-    
-    # MLE hazard from T_first onwards
-    mask = times >= T_first
-    if mask.sum() > 0:
-        total_events = d[mask].sum()
-        total_exposure = Y[mask].sum()
-        p_hat = total_events / total_exposure if total_exposure > 0 else 0
+    taus = np.asarray(taus, dtype=float)
+    finite = taus[np.isfinite(taus)]
+
+    n_hits = int((taus <= float(B)).sum())
+
+    if finite.size == 0:
+        tau_first = np.nan
+        tau_median = np.nan
+        tau_max = np.nan
     else:
-        p_hat = 0
-    
-    # Valid geometric envelope rate
-    # a_valid = 1 - max_{n >= T} S_cond(n)^{1/(n-T+1)}
-    S_T_minus_1 = 1.0  # S(T_first - 1) = 1 (no events before T_first)
-    
-    max_root = 0.0
-    for i, t in enumerate(times):
-        if t >= T_first and S[i] > 0:
-            S_cond = S[i] / S_T_minus_1
-            n_steps = t - T_first + 1
-            root = S_cond ** (1.0 / n_steps)
-            max_root = max(max_root, root)
-    
-    a_valid = 1 - max_root if max_root > 0 else 0
-    
-    # Clustering index
-    clustering = a_valid / p_hat if p_hat > 0 else None
-    
+        tau_first = float(np.min(finite))
+        tau_median = float(np.median(finite))
+        tau_max = float(np.max(finite))
+
+    T = tail_start
+    if T is None:
+        T = int(tau_first) if np.isfinite(tau_first) else 0
+    T = int(np.clip(T, 0, B))
+
+    km = kaplan_meier_discrete(taus, B=B)
+
+    p_hat = pooled_tail_hazard(km, T=T)
+    p_lcb = pooled_tail_hazard_lcb(km, T=T, alpha=alpha)
+    a_env = geometric_envelope_rate(km, T=T)
+
+    # Temporal clustering index based on inter-hit gaps among successful runs.
+    # We use the inverse CV (mean / std), so smaller values indicate more bursty
+    # / clustered hitting patterns (as in the empirical discussion).
+    clustering = float("nan")
+    if finite.size >= 3:
+        gaps = np.diff(np.sort(finite))
+        if gaps.size > 0:
+            mu = float(np.mean(gaps))
+            sigma = float(np.std(gaps))
+            if sigma > 0:
+                clustering = mu / sigma
+            elif mu > 0:
+                clustering = float("inf")
+
     return {
-        'n_runs': n_runs,
-        'n_hits': n_hits,
-        'hit_rate': n_hits / n_runs,
-        'T_first': T_first,
-        'tau_min': int(finite_taus.min()),
-        'tau_med': tau_med,
-        'tau_max': tau_max,
-        'p_hat': p_hat,
-        'a_valid': a_valid,
-        'clustering': clustering,
-        'km_times': times,
-        'km_survival': S,
+        "n_hits": n_hits,
+        "tau_first": tau_first,
+        "tau_median": tau_median,
+        "tau_max": tau_max,
+        "tail_start": float(T),
+        "p_hat": p_hat,
+        "p_lcb": p_lcb,
+        "a_env": a_env,
+        "clustering": clustering,
     }
-
-
-def compute_greenwood_variance(
-    times: np.ndarray,
-    survival: np.ndarray,
-    risk_sets: np.ndarray,
-    events: np.ndarray
-) -> np.ndarray:
-    """
-    Compute Greenwood's variance estimate for KM survival.
-    
-    Args:
-        times, survival, risk_sets, events: Output from kaplan_meier()
-    
-    Returns:
-        Array of variance estimates at each time point
-    """
-    variance = np.zeros_like(survival)
-    cumsum = 0.0
-    
-    for i in range(len(times)):
-        Y_t = risk_sets[i]
-        d_t = events[i]
-        if Y_t > d_t and Y_t > 0:
-            cumsum += d_t / (Y_t * (Y_t - d_t))
-        variance[i] = survival[i]**2 * cumsum
-    
-    return variance

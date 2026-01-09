@@ -1,530 +1,438 @@
 #!/usr/bin/env python3
-"""
-Witness frequency (gamma_t) estimation for L-SHADE.
+r"""
+witness_frequency.py
 
-This module estimates the partial witness frequency by checking
-conditions (L2) and (L3) from the logged memory states.
+Memory-condition checks and witness-frequency estimators aligned with the paper.
 
-Condition (L1) - the success-F window - is problem-dependent and
-cannot be verified from algorithm state alone.
+This module provides:
+- L2 (F-density) and L3 (CR-tail) checks for "empirically good memory"
+  based on the actual L-SHADE sampling rules used in algorithms/lshade.py.
+- Per-generation indicators and pooled frequency estimators (gamma, L2-rate, L3-rate)
+  computed over at-risk runs (right-censoring handled via taus and budget).
+
+Important implementation detail (matches algorithms/lshade.py):
+- F is sampled by repeated Cauchy draws until F>0, then clipped: F := min(F, 1).
+  Therefore, on the continuous region F in (0,1), the density is:
+
+      g(F | mu) = cauchy_pdf(F; mu, sigma_f) / P(X>0),
+
+  where X ~ Cauchy(mu, sigma_f). (There is additional point mass at F=1 due to clipping.)
+  For intervals strictly below 1, the point mass is irrelevant.
+
+- CR is sampled as Normal(mu, sigma_cr) and then clipped to [0,1]. For thresholds c_cr<1,
+  P(CR >= c_cr) equals P(Z >= c_cr) for Z ~ Normal(mu, sigma_cr) (clipping does not
+  reduce the upper-tail probability).
+
+These correspond to the "good memory" condition (Definition / Eq. (good-memory-cond))
+used in the theoretical hazard bounds.
 """
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 from scipy.stats import cauchy, norm, beta, binom
-from typing import Dict, List, Optional, Tuple, Any
 
 
-def check_L2(
-    memory_f: np.ndarray,
-    F_minus: float = 0.1,
-    F_plus: float = 0.9,
-    g_minus: float = 0.1,
-    sigma_f: float = 0.1
-) -> bool:
-    """
-    Check if any memory slot satisfies the F-density lower bound (L2).
-    
-    Condition: inf_{F in [F^-, F^+]} g^F_{t,i,k}(F) >= g^-
-    
-    The F-distribution is truncated Cauchy on (0, 1] with:
-    - location = M_F[k]
-    - scale = sigma_f (default 0.1)
-    
-    Args:
-        memory_f: Array of M_F[k] values for k = 1, ..., H
-        F_minus, F_plus: Interval for F
-        g_minus: Density lower bound threshold
-        sigma_f: Cauchy scale parameter
-    
-    Returns:
-        True if at least one slot satisfies the condition
-    """
-    for mu in memory_f:
-        if np.isnan(mu):
-            continue
-        
-        # Find worst-case F in [F_minus, F_plus] (point furthest from mode)
-        if mu <= F_minus:
-            F_worst = F_plus
-        elif mu >= F_plus:
-            F_worst = F_minus
-        else:
-            # Mode is inside interval; worst case is at boundary furthest from mode
-            F_worst = F_minus if (mu - F_minus) > (F_plus - mu) else F_plus
-        
-        # Truncated Cauchy density
-        density = cauchy.pdf(F_worst, loc=mu, scale=sigma_f)
-        norm_const = (
-            cauchy.cdf(1.0, loc=mu, scale=sigma_f) - 
-            cauchy.cdf(0.0, loc=mu, scale=sigma_f)
-        )
-        
-        if norm_const > 0:
-            density_normalized = density / norm_const
-            if density_normalized >= g_minus:
-                return True
-    
-    return False
+# ----------------------------
+# Default diagnostic thresholds (tune to match the paper constants)
+# ----------------------------
+
+GAMMA_THRESHOLDS: Dict[str, float] = {
+    # Paper-style interval for "successful" / admissible F values
+    "F_minus": 0.10,
+    "F_plus": 0.90,
+    # Uniform lower bound required on the F sampling density over [F_minus, F_plus]
+    "g_minus": 0.10,
+    # CR threshold and lower bound on its upper tail
+    "c_cr": 0.50,
+    "q_minus": 0.25,
+    # Sampling scales used by L-SHADE
+    "sigma_f": 0.10,
+    "sigma_cr": 0.10,
+    # L-SHADE settings used in theory tables / bounds
+    "H": 6,
+    "p_best": 0.11,
+    "m_min": 4,
+}
+
+# ----------------------------
+# L2/L3 checks for a single memory slot
+# ----------------------------
+
+def _as_float(x) -> float:
+    if x is None:
+        return float("nan")
+    try:
+        return float(x)
+    except Exception:
+        return float("nan")
 
 
-def check_L3(
-    memory_cr: np.ndarray,
-    c_cr: float = 0.5,
-    q_minus: float = 0.25,
-    sigma_cr: float = 0.1
-) -> bool:
+def check_L2(mu_f: float, F_minus: float, F_plus: float, g_minus: float, sigma_f: float = 0.10) -> bool:
     """
-    Check if any memory slot satisfies the CR tail bound (L3).
-    
-    Condition: P(CR >= c_cr | M_CR[k]) >= q^-
-    
-    The CR-distribution is clipped Normal on [0, 1] with:
-    - mean = M_CR[k] 
-    - std = sigma_cr (default 0.1)
-    
-    Args:
-        memory_cr: Array of M_CR[k] values (NaN for terminal value)
-        c_cr: CR threshold
-        q_minus: Tail probability lower bound
-        sigma_cr: Normal std parameter
-    
-    Returns:
-        True if at least one slot satisfies the condition
+    L2: density lower bound for F.
+
+    We compute the continuous density of the sampled F distribution on (0,1):
+        g(F) = cauchy.pdf(F; mu_f, sigma_f) / P(X>0),
+    where X ~ Cauchy(mu_f, sigma_f), because the algorithm rejects nonpositive samples.
+
+    For unimodal densities, inf_{F in [F_minus, F_plus]} g(F) is attained at an endpoint,
+    so we check the minimum density at the two endpoints.
+
+    Returns True iff inf density >= g_minus.
     """
-    for mu in memory_cr:
-        if np.isnan(mu):
-            # Terminal value: CR = 0, so P(CR >= c_cr) = 0
-            continue
-        
-        # P(CR >= c_cr) for Normal(mu, sigma_cr)
-        # Note: This is approximate; exact would account for clipping to [0,1]
-        prob = 1.0 - norm.cdf(c_cr, loc=mu, scale=sigma_cr)
-        
-        if prob >= q_minus:
-            return True
-    
-    return False
+    mu_f = _as_float(mu_f)
+    if not np.isfinite(mu_f):
+        return False
+
+    F_minus = float(F_minus)
+    F_plus = float(F_plus)
+
+    if not (0.0 < F_minus <= F_plus <= 1.0):
+        raise ValueError("Require 0 < F_minus <= F_plus <= 1")
+
+    # Normalization due to rejection of X<=0
+    p_pos = 1.0 - float(cauchy.cdf(0.0, loc=mu_f, scale=sigma_f))
+    if p_pos <= 0.0:
+        return False
+
+    d1 = float(cauchy.pdf(F_minus, loc=mu_f, scale=sigma_f)) / p_pos
+    d2 = float(cauchy.pdf(F_plus, loc=mu_f, scale=sigma_f)) / p_pos
+
+    return (min(d1, d2) >= float(g_minus))
+
+
+def check_L3(mu_cr: float, c_cr: float, q_minus: float, sigma_cr: float = 0.10) -> bool:
+    """
+    L3: lower bound on the CR upper tail probability.
+
+    The algorithm samples Z ~ Normal(mu_cr, sigma_cr) and clips to [0,1].
+    For c_cr < 1, P(clipped(Z) >= c_cr) = P(Z >= c_cr).
+
+    Returns True iff q(mu_cr) >= q_minus.
+    """
+    mu_cr = _as_float(mu_cr)
+    if not np.isfinite(mu_cr):
+        return False
+
+    q = 1.0 - float(norm.cdf(c_cr, loc=mu_cr, scale=sigma_cr))
+    return (q >= float(q_minus))
+
+
+# ----------------------------
+# Per-generation indicators for a run
+# ----------------------------
+
+@dataclass
+class WitnessIndicators:
+    L2: np.ndarray          # shape (T,), bool
+    L3: np.ndarray          # shape (T,), bool
+    gamma: np.ndarray       # shape (T,), bool (L2 & L3)
 
 
 def compute_witness_indicators(
-    history: Dict[str, List],
-    F_minus: float = 0.1,
-    F_plus: float = 0.9,
-    g_minus: float = 0.1,
-    c_cr: float = 0.5,
-    q_minus: float = 0.25,
-    sigma_f: float = 0.1,
-    sigma_cr: float = 0.1
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    memory_f: Sequence[Sequence[float]],
+    memory_cr: Sequence[Sequence[float]],
+    thresholds: Dict[str, float] = GAMMA_THRESHOLDS,
+) -> WitnessIndicators:
     """
-    Compute partial witness indicators for each generation.
-    
-    Args:
-        history: Dictionary with 'memory_f' and 'memory_cr' lists
-        Other args: Threshold parameters
-    
-    Returns:
-        Tuple of:
-        - indicators: 0/1 array (L2 AND L3)
-        - l2_indicators: 0/1 array (L2 only)
-        - l3_indicators: 0/1 array (L3 only)
+    Given logged memory arrays for a single run:
+      memory_f[t]  = list/array length H of MF values at generation t
+      memory_cr[t] = list/array length H of MCR values at generation t
+
+    Return per-generation indicators:
+      L2(t) = 1{ exists k : check_L2(MF[t,k]) }
+      L3(t) = 1{ exists k : check_L3(MCR[t,k]) }
+
+      gamma(t) = 1{ exists k : check_L2(MF[t,k]) AND check_L3(MCR[t,k]) }.
+
+    The definition of "good memory" in the paper (Definition\ \ref{def:good-memory})
+    requires that both conditions hold for the **same** memory slot, since L-SHADE
+    samples (F, CR) from a single uniformly-chosen slot k each generation.
     """
-    n_gen = len(history['memory_f'])
-    
-    indicators = np.zeros(n_gen)
-    l2_indicators = np.zeros(n_gen)
-    l3_indicators = np.zeros(n_gen)
-    
-    for t in range(n_gen):
-        mem_f = np.asarray(history['memory_f'][t])
-        mem_cr = np.asarray(history['memory_cr'][t])
-        
-        l2_ok = check_L2(mem_f, F_minus, F_plus, g_minus, sigma_f)
-        l3_ok = check_L3(mem_cr, c_cr, q_minus, sigma_cr)
-        
-        l2_indicators[t] = 1 if l2_ok else 0
-        l3_indicators[t] = 1 if l3_ok else 0
-        indicators[t] = 1 if (l2_ok and l3_ok) else 0
-    
-    return indicators, l2_indicators, l3_indicators
+    F_minus = thresholds["F_minus"]
+    F_plus = thresholds["F_plus"]
+    g_minus = thresholds["g_minus"]
+    c_cr = thresholds["c_cr"]
+    q_minus = thresholds["q_minus"]
+    sigma_f = thresholds.get("sigma_f", 0.10)
+    sigma_cr = thresholds.get("sigma_cr", 0.10)
+
+    T = min(len(memory_f), len(memory_cr))
+    L2_arr = np.zeros(T, dtype=bool)
+    L3_arr = np.zeros(T, dtype=bool)
+    gamma_arr = np.zeros(T, dtype=bool)
+
+    for t in range(T):
+        mf = list(memory_f[t])
+        mcr = list(memory_cr[t])
+
+        # L2: any slot satisfies density bound
+        ok2 = any(
+            check_L2(mu, F_minus=F_minus, F_plus=F_plus, g_minus=g_minus, sigma_f=sigma_f)
+            for mu in mf
+        )
+        L2_arr[t] = ok2
+
+        # L3: any slot satisfies CR tail bound
+        ok3 = any(
+            check_L3(mu, c_cr=c_cr, q_minus=q_minus, sigma_cr=sigma_cr)
+            for mu in mcr
+        )
+        L3_arr[t] = ok3
+
+        # Good memory (gamma): exists a single slot k where both are satisfied
+        ok_gamma = False
+        H = min(len(mf), len(mcr))
+        for k in range(H):
+            if check_L2(mf[k], F_minus=F_minus, F_plus=F_plus, g_minus=g_minus, sigma_f=sigma_f) and \
+               check_L3(mcr[k], c_cr=c_cr, q_minus=q_minus, sigma_cr=sigma_cr):
+                ok_gamma = True
+                break
+        gamma_arr[t] = ok_gamma
+
+    return WitnessIndicators(L2=L2_arr, L3=L3_arr, gamma=gamma_arr)
 
 
-# =============================================================================
-# Clopper-Pearson Confidence Bounds
-# =============================================================================
-
-def clopper_pearson_lower(
-    k: int,
-    n: int,
-    alpha: float = 0.05
-) -> float:
-    """
-    Compute Clopper-Pearson lower confidence bound for binomial proportion.
-    
-    For k successes out of n trials, returns the lower (1-alpha) bound.
-    
-    Uses the relationship between binomial and beta distributions:
-        Lower bound = BetaInv(alpha; k, n-k+1)
-    
-    Args:
-        k: Number of successes
-        n: Number of trials
-        alpha: Significance level (default 0.05 for 95% CI)
-    
-    Returns:
-        Lower confidence bound for the proportion k/n
-    """
-    if k == 0:
-        return 0.0
-    if k == n:
-        return beta.ppf(alpha, k, 1)
-    return beta.ppf(alpha, k, n - k + 1)
-
-
-def clopper_pearson_upper(
-    k: int,
-    n: int,
-    alpha: float = 0.05
-) -> float:
-    """
-    Compute Clopper-Pearson upper confidence bound for binomial proportion.
-    
-    For k successes out of n trials, returns the upper (1-alpha) bound.
-    
-    Uses the relationship:
-        Upper bound = BetaInv(1-alpha; k+1, n-k)
-    
-    Args:
-        k: Number of successes
-        n: Number of trials
-        alpha: Significance level (default 0.05 for 95% CI)
-    
-    Returns:
-        Upper confidence bound for the proportion k/n
-    """
-    if k == n:
-        return 1.0
-    if k == 0:
-        return beta.ppf(1 - alpha, 1, n)
-    return beta.ppf(1 - alpha, k + 1, n - k)
-
-
-def clopper_pearson_interval(
-    k: int,
-    n: int,
-    alpha: float = 0.05
-) -> Tuple[float, float]:
-    """
-    Compute two-sided Clopper-Pearson confidence interval.
-    
-    Args:
-        k: Number of successes
-        n: Number of trials
-        alpha: Total significance level (default 0.05 for 95% CI)
-    
-    Returns:
-        Tuple (lower, upper) confidence bounds
-    """
-    return (
-        clopper_pearson_lower(k, n, alpha / 2),
-        clopper_pearson_upper(k, n, alpha / 2)
-    )
-
+# ----------------------------
+# Pooled frequency estimation over at-risk runs
+# ----------------------------
 
 def estimate_gamma(
-    runs: List[Dict],
     taus: np.ndarray,
-    F_minus: float = 0.1,
-    F_plus: float = 0.9,
-    g_minus: float = 0.1,
-    c_cr: float = 0.5,
-    q_minus: float = 0.25,
-    sigma_f: float = 0.1,
-    sigma_cr: float = 0.1
-) -> Dict[str, Any]:
+    indicators: List[WitnessIndicators],
+    B: Optional[int] = None,
+    start_gen: int = 0,
+    end_gen: Optional[int] = None,
+    alive_strict: bool = True,
+) -> Dict[str, float]:
     """
-    Estimate gamma_t (partial witness frequency) on KM risk sets.
-    
-    For each generation t, computes:
-        gamma_t = (# at-risk runs with L_t^partial) / (# at-risk runs)
-    
-    Args:
-        runs: List of run dictionaries with 'history' key
-        taus: Array of hitting times for these runs
-        Other args: Threshold parameters
-    
-    Returns:
-        Dictionary with:
-        - generations: array of generation indices
-        - gamma_t: array of gamma estimates
-        - l2_rate: array of L2 satisfaction rates
-        - l3_rate: array of L3 satisfaction rates
-        - Y_t: array of risk set sizes
-        - gamma_mean: overall mean gamma
+    Pooled (time-weighted) estimates of L2, L3, and gamma over generations.
+
+    This implements the pooled estimator described in Appendix (witness proxy),
+    adapted to generic per-generation indicators:
+
+      Y_t = #{runs with \tilde{tau} >= t}  (KM risk set)
+      M_t^X = sum_r 1{alive at t} * 1{X holds at t in run r}
+      \bar X = (sum_t M_t^X) / (sum_t Y_t)   (pooled time-weighted frequency)
+
+    Where "alive at t" can be:
+      - strict: \tilde{tau} > t  (recommended when X is meant to hold *before* hitting)
+      - non-strict: \tilde{tau} >= t
+
+    Parameters
+    ----------
+    taus : array (R,)
+        Hitting times; np.inf for censored runs.
+    indicators : list length R
+        WitnessIndicators for each run.
+    B : int or None
+        Budget (last gen). If None, uses max available indicator length - 1.
+    start_gen : int
+        Start generation (inclusive) for pooling.
+    end_gen : int or None
+        End generation (inclusive). If None, uses B.
+    alive_strict : bool
+        Whether to use \tilde{tau} > t for "alive".
+
+    Returns dict with:
+      l2_rate, l3_rate, gamma, total_trials, total_hits_active
     """
-    # Check if history is available
-    has_history = all('history' in r and r['history'] is not None for r in runs)
-    if not has_history:
-        return {
-            'generations': None,
-            'gamma_t': None,
-            'l2_rate': None,
-            'l3_rate': None,
-            'Y_t': None,
-            'gamma_mean': None,
-            'error': 'No history logged in runs'
-        }
-    
-    # Compute witness indicators for each run
-    all_indicators = []
-    all_l2 = []
-    all_l3 = []
-    
-    for r in runs:
-        ind, l2, l3 = compute_witness_indicators(
-            r['history'], F_minus, F_plus, g_minus, c_cr, q_minus, sigma_f, sigma_cr
-        )
-        all_indicators.append(ind)
-        all_l2.append(l2)
-        all_l3.append(l3)
-    
-    # Find max generations
-    max_gen = max(len(ind) for ind in all_indicators)
-    
-    # Estimate gamma_t on risk sets
-    gamma_t = []
-    l2_rate = []
-    l3_rate = []
-    Y_t_list = []
-    
-    for t in range(1, max_gen + 1):
-        # Risk set: runs with tau >= t (not yet hit by generation t)
-        at_risk_indices = [i for i, tau in enumerate(taus) if tau >= t]
-        Y_t = len(at_risk_indices)
-        
+    R = len(indicators)
+    if R == 0:
+        return {"l2_rate": np.nan, "l3_rate": np.nan, "gamma": np.nan, "total_trials": 0.0}
+
+    taus = np.asarray(taus, dtype=float)
+
+    # determine budget B from indicators if not provided
+    max_T = min(ind.gamma.shape[0] for ind in indicators) - 1
+    if B is None:
+        B = max_T
+    B = int(min(B, max_T))
+    if B < 0:
+        return {"l2_rate": np.nan, "l3_rate": np.nan, "gamma": np.nan, "total_trials": 0.0}
+
+    end = B if end_gen is None else int(min(end_gen, B))
+    start = int(max(0, start_gen))
+    if end < start:
+        return {"l2_rate": np.nan, "l3_rate": np.nan, "gamma": np.nan, "total_trials": 0.0}
+
+    # observed time
+    tilde = np.minimum(taus, float(B))
+
+    total_risk = 0
+    sum_L2 = 0
+    sum_L3 = 0
+    sum_gamma = 0
+
+    for t in range(start, end + 1):
+        if alive_strict:
+            alive = tilde > float(t)
+        else:
+            alive = tilde >= float(t)
+
+        idx = np.where(alive)[0]
+        Y_t = int(idx.size)
         if Y_t == 0:
-            gamma_t.append(np.nan)
-            l2_rate.append(np.nan)
-            l3_rate.append(np.nan)
-            Y_t_list.append(0)
             continue
-        
-        witness_count = 0
-        l2_count = 0
-        l3_count = 0
-        
-        for idx in at_risk_indices:
-            if t - 1 < len(all_indicators[idx]):
-                witness_count += all_indicators[idx][t - 1]
-                l2_count += all_l2[idx][t - 1]
-                l3_count += all_l3[idx][t - 1]
-        
-        gamma_t.append(witness_count / Y_t)
-        l2_rate.append(l2_count / Y_t)
-        l3_rate.append(l3_count / Y_t)
-        Y_t_list.append(Y_t)
-    
-    gamma_t = np.array(gamma_t)
-    
+
+        total_risk += Y_t
+        for r in idx:
+            if indicators[r].L2[t]:
+                sum_L2 += 1
+            if indicators[r].L3[t]:
+                sum_L3 += 1
+            if indicators[r].gamma[t]:
+                sum_gamma += 1
+
+    # If there were no at-risk generations in the pooling window (e.g., all runs
+    # hit at t=0 and alive_strict=True), these pooled quantities are undefined.
+    if total_risk == 0:
+        return {"l2_rate": np.nan, "l3_rate": np.nan, "gamma": np.nan, "total_trials": 0.0}
+
     return {
-        'generations': np.arange(1, max_gen + 1),
-        'gamma_t': gamma_t,
-        'l2_rate': np.array(l2_rate),
-        'l3_rate': np.array(l3_rate),
-        'Y_t': np.array(Y_t_list),
-        'gamma_mean': float(np.nanmean(gamma_t)),
-        'l2_mean': float(np.nanmean(l2_rate)),
-        'l3_mean': float(np.nanmean(l3_rate)),
+        "l2_rate": float(sum_L2 / total_risk),
+        "l3_rate": float(sum_L3 / total_risk),
+        "gamma": float(sum_gamma / total_risk),
+        "total_trials": float(total_risk),
     }
+
+
+# ----------------------------
+# Confidence intervals for pooled gamma
+# ----------------------------
+
+def clopper_pearson_interval(k: int, n: int, alpha: float = 0.05) -> Tuple[float, float]:
+    """
+    Two-sided Clopper–Pearson interval for Binomial(n,p) at confidence 1-alpha.
+    """
+    if n <= 0:
+        return (0.0, 1.0)
+    k = int(k)
+    n = int(n)
+    if k <= 0:
+        lo = 0.0
+    else:
+        lo = float(beta.ppf(alpha / 2.0, k, n - k + 1))
+    if k >= n:
+        hi = 1.0
+    else:
+        hi = float(beta.ppf(1 - alpha / 2.0, k + 1, n - k))
+    return (lo, hi)
 
 
 def estimate_gamma_with_ci(
-    runs: List[Dict],
     taus: np.ndarray,
+    indicators: List[WitnessIndicators],
+    B: Optional[int] = None,
+    start_gen: int = 0,
+    end_gen: Optional[int] = None,
     alpha: float = 0.05,
-    F_minus: float = 0.1,
-    F_plus: float = 0.9,
-    g_minus: float = 0.1,
-    c_cr: float = 0.5,
-    q_minus: float = 0.25,
-    sigma_f: float = 0.1,
-    sigma_cr: float = 0.1
-) -> Dict[str, Any]:
-    """
-    Estimate gamma_t with Clopper-Pearson confidence bounds.
-    
-    Extends estimate_gamma() with conservative (1-alpha) confidence bounds.
-    
-    Under independent runs, M_t^L | Y_t ~ Binomial(Y_t, gamma_t^partial).
-    
-    Args:
-        runs: List of run dictionaries with 'history' key
-        taus: Array of hitting times for these runs
-        alpha: Significance level for confidence bounds
-        Other args: Threshold parameters
-    
-    Returns:
-        Dictionary with all fields from estimate_gamma() plus:
-        - gamma_lower: array of Clopper-Pearson lower bounds
-        - gamma_upper: array of Clopper-Pearson upper bounds
-        - M_t: array of witness counts (numerator)
-    """
-    # Check if history is available
-    has_history = all('history' in r and r['history'] is not None for r in runs)
-    if not has_history:
-        return {
-            'generations': None,
-            'gamma_t': None,
-            'gamma_lower': None,
-            'gamma_upper': None,
-            'M_t': None,
-            'l2_rate': None,
-            'l3_rate': None,
-            'Y_t': None,
-            'gamma_mean': None,
-            'gamma_lower_mean': None,
-            'error': 'No history logged in runs'
-        }
-    
-    # Compute witness indicators for each run
-    all_indicators = []
-    all_l2 = []
-    all_l3 = []
-    
-    for r in runs:
-        ind, l2, l3 = compute_witness_indicators(
-            r['history'], F_minus, F_plus, g_minus, c_cr, q_minus, sigma_f, sigma_cr
-        )
-        all_indicators.append(ind)
-        all_l2.append(l2)
-        all_l3.append(l3)
-    
-    # Find max generations
-    max_gen = max(len(ind) for ind in all_indicators)
-    
-    # Estimate gamma_t on risk sets with confidence bounds
-    gamma_t = []
-    gamma_lower = []
-    gamma_upper = []
-    M_t_list = []
-    l2_rate = []
-    l3_rate = []
-    Y_t_list = []
-    
-    for t in range(1, max_gen + 1):
-        # Risk set: runs with tau >= t (not yet hit by generation t)
-        at_risk_indices = [i for i, tau in enumerate(taus) if tau >= t]
-        Y_t = len(at_risk_indices)
-        
-        if Y_t == 0:
-            gamma_t.append(np.nan)
-            gamma_lower.append(np.nan)
-            gamma_upper.append(np.nan)
-            M_t_list.append(0)
-            l2_rate.append(np.nan)
-            l3_rate.append(np.nan)
-            Y_t_list.append(0)
-            continue
-        
-        witness_count = 0
-        l2_count = 0
-        l3_count = 0
-        
-        for idx in at_risk_indices:
-            if t - 1 < len(all_indicators[idx]):
-                witness_count += int(all_indicators[idx][t - 1])
-                l2_count += int(all_l2[idx][t - 1])
-                l3_count += int(all_l3[idx][t - 1])
-        
-        # Point estimate
-        gamma_t.append(witness_count / Y_t)
-        M_t_list.append(witness_count)
-        
-        # Clopper-Pearson bounds
-        lower, upper = clopper_pearson_interval(witness_count, Y_t, alpha)
-        gamma_lower.append(lower)
-        gamma_upper.append(upper)
-        
-        l2_rate.append(l2_count / Y_t)
-        l3_rate.append(l3_count / Y_t)
-        Y_t_list.append(Y_t)
-    
-    gamma_t = np.array(gamma_t)
-    gamma_lower = np.array(gamma_lower)
-    gamma_upper = np.array(gamma_upper)
-    
-    return {
-        'generations': np.arange(1, max_gen + 1),
-        'gamma_t': gamma_t,
-        'gamma_lower': gamma_lower,
-        'gamma_upper': gamma_upper,
-        'M_t': np.array(M_t_list),
-        'l2_rate': np.array(l2_rate),
-        'l3_rate': np.array(l3_rate),
-        'Y_t': np.array(Y_t_list),
-        'gamma_mean': float(np.nanmean(gamma_t)),
-        'gamma_lower_mean': float(np.nanmean(gamma_lower)),
-        'gamma_upper_mean': float(np.nanmean(gamma_upper)),
-        'l2_mean': float(np.nanmean(l2_rate)),
-        'l3_mean': float(np.nanmean(l3_rate)),
-        'alpha': alpha,
-    }
-
-
-def compute_theoretical_a_t(
-    d: int,
-    H: int = 6,
-    p: float = 0.11,
-    arc_rate: float = 2.6,
-    g_minus: float = 0.1,
-    Delta_F: float = 0.1,
-    q_minus: float = 0.25,
-    c_cr: float = 0.5,
-    r: Optional[int] = None
+    alive_strict: bool = True,
 ) -> Dict[str, float]:
     """
-    Compute theoretical hazard floor a_t from equation (a_t-L).
-    
-    a_t = (1/H) * (1/m_t) * (1/(s1*(s2-1))) * (g^- * Delta_F) * (q^- * eta_r)
-    
-    Args:
-        d: Dimension
-        H: Memory size
-        p: p-best fraction
-        arc_rate: Archive rate
-        g_minus, Delta_F, q_minus, c_cr: Witness thresholds
-        r: Number of parent coordinates allowed (default: floor((d-1)/2))
-    
-    Returns:
-        Dictionary with a_t and component values
+    Same as estimate_gamma, but also returns a two-sided CP CI for the pooled gamma.
     """
-    N_init = 18 * d
-    m_t = max(1, int(np.ceil(p * N_init)))
-    s1 = N_init - 2
-    s2 = N_init + int(arc_rate * N_init) - 2
-    
-    # Default r for c_cr = 0.5
+    est = estimate_gamma(
+        taus=taus,
+        indicators=indicators,
+        B=B,
+        start_gen=start_gen,
+        end_gen=end_gen,
+        alive_strict=alive_strict,
+    )
+
+    n = int(est.get("total_trials", 0.0))
+    k = int(round(est["gamma"] * n)) if n > 0 else 0
+    lo, hi = clopper_pearson_interval(k, n, alpha=alpha)
+    est.update({"gamma_lo": lo, "gamma_hi": hi, "k": float(k), "n": float(n)})
+    return est
+
+
+# ----------------------------
+# Theoretical helper quantities (for bounds)
+# ----------------------------
+
+def eta_r(d: int, c_cr: float, r: Optional[int] = None) -> float:
+    """
+    eta_r(d,c_cr) from Lemma (eta-def):
+      eta_r = P(Bin(d-1, c_cr) >= d-r-1).
+
+    If r is None, we default to r = floor((d-1)/2).
+    """
+    d = int(d)
     if r is None:
         r = (d - 1) // 2
-    
-    # eta_r = P(Bin(d-1, c_cr) >= d-r-1)
-    eta_r = 1 - binom.cdf(d - r - 2, d - 1, c_cr)
-    
-    # Compute a_t
-    a_t = (1/H) * (1/m_t) * (1/(s1 * (s2 - 1))) * (g_minus * Delta_F) * (q_minus * eta_r)
-    
-    return {
-        'a_t': a_t,
-        'd': d,
-        'H': H,
-        'N_init': N_init,
-        'm_t': m_t,
-        's1': s1,
-        's2': s2,
-        'r': r,
-        'c_cr': c_cr,
-        'eta_r': eta_r,
-        'g_minus': g_minus,
-        'Delta_F': Delta_F,
-        'q_minus': q_minus,
-    }
+    r = int(r)
+    thresh = d - r - 1
+    n = d - 1
+    # P(Bin(n,p) >= thresh)
+    return float(binom.sf(thresh - 1, n, c_cr))
+
+
+def compute_generic_a_t(
+    N: int,
+    A: int,
+    H: int,
+    p_best: float,
+    m_min: int,
+    g_minus: float,
+    F_minus: float,
+    F_plus: float,
+    q_minus: float,
+    c_cr: float,
+    d: int,
+    r: Optional[int] = None,
+) -> float:
+    """
+    Generic (combinatorial) per-individual hazard lower bound (the small one),
+    matching the structure of Proposition (gamma0-combinatorial) / Lemma (eta-def).
+
+    This is the "a_t" that multiplies the witness probability gamma_t, with:
+      a_t = (1/H) * g_minus*(F_plus-F_minus) * q_minus * eta_r * (1/(ceil(pN))) * ...
+    and donor-selection factors based on minimal clique size m_min.
+
+    NOTE: this is intentionally conservative; for Morse bounds use compute_morse_a_t.
+    """
+    N = int(N)
+    A = int(A)
+    H = int(H)
+    m_min = int(m_min)
+    pN = int(np.ceil(p_best * N)) if N > 0 else 1
+
+    Delta_F = float(F_plus - F_minus)
+    eta = eta_r(d=d, c_cr=c_cr, r=r)
+
+    if N < 4 or m_min < 4:
+        return 0.0
+
+    # donor-selection probabilities (one possible conservative variant)
+    # r1 from population excluding i and b -> size ~ (N-2)
+    # r2 from pop+archive excluding i,b,r1 -> size ~ (N+A-3)
+    # require r1,r2 in a cluster of size m_min: approximate with (m_min-2)/(N-2) * (m_min-3)/(N+A-3)
+    denom1 = max(N - 2, 1)
+    denom2 = max(N + A - 3, 1)
+    p_pair = ((m_min - 2) / denom1) * ((m_min - 3) / denom2)
+
+    return float((1.0 / H) * (g_minus * Delta_F) * (q_minus * eta) * (1.0 / pN) * p_pair)
+
+
+def compute_morse_a_t(
+    H: int,
+    c_pair: float,
+    g_minus: float,
+    Delta_F: float,
+    q_minus: float,
+    eta: float,
+) -> float:
+    """
+    Morse-style per-individual hazard lower bound (Theorem morse-hazard):
+      \tilde a_t = (c_pair/H) * (g^- * Delta_F) * (q^- * eta).
+
+    Here c_pair is the concentration-dependent donor-pair probability proxy
+    (often lower-bounded by beta1*beta2 under the concentration assumption).
+    """
+    return float((c_pair / H) * (g_minus * Delta_F) * (q_minus * eta))
