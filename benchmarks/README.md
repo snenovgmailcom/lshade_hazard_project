@@ -111,6 +111,12 @@ Run one function:
 python benchmarks/benchmark.py --dim 10 --functions f1 --runs 51 --jobs 32
 ```
 
+# Run all functions
+
+```bash
+python benchmarks/benchmark.py --dim 10 --functions all --runs 51 --jobs 160
+```
+
 ---
 
 ## AI Assistance Disclosure
