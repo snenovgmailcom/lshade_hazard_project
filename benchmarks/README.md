@@ -109,6 +109,7 @@ Run one function:
 
 ```bash
 python benchmarks/benchmark.py --dim 10 --functions f1 --runs 51 --jobs 32
+```
 
 ---
 
