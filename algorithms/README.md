@@ -55,3 +55,7 @@ ensure correctness, reproducibility, and alignment with the research objectives.
 [2] R. Tanabe and A. Fukunaga,  
     *Improving the Search Performance of SHADE Using Linear Population Size Reduction*,  
     IEEE Congress on Evolutionary Computation (CEC), 2014.
+
+[3] N. H. Awad, M. Z. Ali, J. J. Liang, B. Y. Qu, and P. N. Suganthan,
+    *Problem Definitions and Evaluation Criteria for the CEC 2017 Special Session and Competition on Single Objective Real-Parameter Numerical Optimization*,
+    Technical Report, Nanyang Technological University, Singapore, 2016.
