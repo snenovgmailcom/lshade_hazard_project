@@ -1,0 +1,33 @@
+{
+  "meta": {
+    "func": "f27",
+    "f_star": 2700.0,
+    "eps": 500.0,
+    "eps_quarter": 125.0,
+    "F_minus": 0.1,
+    "F_plus": 0.9,
+    "Delta_F": 0.8,
+    "window": 20,
+    "dim": 10,
+    "H": 6,
+    "c_cr": 0.5,
+    "eta_r": 0.5,
+    "r_conc": 3.0,
+    "n_runs": 51,
+    "n_valid": 0,
+    "mode": "sum",
+    "g_threshold": 0.01,
+    "q_threshold": 0.1
+  },
+  "hitting_times": {
+    "tau_eps_median": null,
+    "tau_eps4_median": null
+  },
+  "validation": {
+    "n_cond_samples": 0,
+    "p_empirical": null,
+    "a_tilde_mean": null,
+    "bound_satisfied": null,
+    "note": "No conditioned samples with LHS data"
+  }
+}

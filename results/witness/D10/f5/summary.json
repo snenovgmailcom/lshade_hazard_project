@@ -1,0 +1,21 @@
+{
+  "n_runs": 51,
+  "n_hits": 51,
+  "hit_rate": 1.0,
+  "tau_median": 297.0,
+  "tau_mean": 296.1764705882353,
+  "G2G3_rate": 0.0,
+  "G4_rate": 0.9902019198940748,
+  "G5_rate": 0.5737173121482952,
+  "Gt_rate": 0.0,
+  "gamma0_mean": 0.0,
+  "Twit_median": NaN,
+  "Twit_mean": NaN,
+  "Twit_inf_rate": 1.0,
+  "n_at_risk_samples": 15105,
+  "function": "cec2017_f5",
+  "eps": 10.0,
+  "dim": 10,
+  "r_conc": 1.0,
+  "m_min": 4
+}

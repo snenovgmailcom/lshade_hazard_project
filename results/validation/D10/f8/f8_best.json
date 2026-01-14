@@ -1,0 +1,33 @@
+{
+  "meta": {
+    "func": "f8",
+    "f_star": 800.0,
+    "eps": 100.0,
+    "eps_quarter": 25.0,
+    "F_minus": 0.1,
+    "F_plus": 0.9,
+    "Delta_F": 0.8,
+    "window": 20,
+    "dim": 10,
+    "H": 6,
+    "c_cr": 0.5,
+    "eta_r": 0.5,
+    "r_conc": 1.0,
+    "n_runs": 51,
+    "n_valid": 51,
+    "mode": "best_slot",
+    "g_threshold": 0.01,
+    "q_threshold": 0.1
+  },
+  "hitting_times": {
+    "tau_eps_median": 2.0,
+    "tau_eps4_median": 149.0
+  },
+  "validation": {
+    "n_cond_samples": 0,
+    "p_empirical": null,
+    "a_tilde_mean": null,
+    "bound_satisfied": null,
+    "note": "No conditioned samples with LHS data"
+  }
+}
