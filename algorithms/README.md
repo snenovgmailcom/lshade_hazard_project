@@ -38,6 +38,14 @@ This implementation is designed for:
 
 ---
 
+## AI Assistance Disclosure
+
+Portions of the code in this directory were developed with the assistance of AI tools (Claude, Anthropic).
+All AI-assisted contributions were reviewed, tested, and validated by the authors to
+ensure correctness, reproducibility, and alignment with the research objectives.
+
+---
+
 ## References
 
 [1] R. Tanabe and A. Fukunaga,  
