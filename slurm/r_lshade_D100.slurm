@@ -5,8 +5,8 @@
 #SBATCH --time=90:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=180
-#SBATCH --mem=64G
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=220G
 #SBATCH --partition=compute
 #SBATCH --mail-user=nenov@uctm.edu
 #SBATCH --mail-type=BEGIN,END,FAIL
@@ -36,7 +36,7 @@ CMD=(
   --dim 100
   --functions all
   --runs 51
-  --jobs 180
+  --jobs 32
   --max-evals 1000000
   --seed-start 42
   --outdir "$OUTDIR"

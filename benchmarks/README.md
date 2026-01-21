@@ -54,10 +54,7 @@ Optional (if `--figs` is enabled):
 
 ---
 
-## Command-line API (all options)
-
-`benchmark.py` supports the following arguments:
-
+## Command-line options (CLI):
 
 - `--dim INT`  
   Dimension `D` (e.g., 10, 30, 50, 100).
@@ -111,7 +108,7 @@ Run one function:
 python benchmarks/benchmark.py --dim 10 --functions f1 --runs 51 --jobs 32
 ```
 
-# Run all functions
+Run all functions
 
 ```bash
 python benchmarks/benchmark.py --dim 10 --functions all --runs 51 --jobs 160

@@ -1,0 +1,2 @@
+Func,n_runs_ok,n_runs,N_med,tau_deep_med,eps_in,eps_out,#A_deep,#A_in\A_deep,#A_out\A_in,#outside,diam(A_out),diam_best,r_conc,s1,s2,c1,c2,beta1,beta2,c_pair_lb,arch_M
+f3,51,51,143,130,1.0,6.985739542716568,1,65,78,0,2.672613851621675,1.7651496516255074,1.6666666666666665,141.0,512.0,139.0,139.0,0.9929078014184397,0.27360308285163776,0.2702451394759087,372

@@ -28,6 +28,7 @@ import sys
 import time
 import argparse
 import pickle
+import lzma
 from pathlib import Path
 import concurrent.futures
 
@@ -433,6 +434,18 @@ def main():
         # ---------------------------------------------------------------------
         func_dir = os.path.join(args.outdir, func_short)
         os.makedirs(func_dir, exist_ok=True)
+        
+        # For high dimensions, save history separately to reduce main PKL size
+        if args.dim >= 100:
+            for r in fn_results:
+                seed = r["seed"]
+                history = r.get("history", {})
+                if history:
+                    hist_path = os.path.join(func_dir, f"history_seed_{seed}.pkl.xz")
+                    with lzma.open(hist_path, "wb") as f:
+                        pickle.dump(history, f)
+                r["history"] = {}  # Clear from main results
+            print(f"  Histories saved separately (compressed)")
         
         pkl_path = os.path.join(func_dir, f"{func_short}.pkl")
         with open(pkl_path, "wb") as f:
